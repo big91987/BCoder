@@ -1,0 +1,175 @@
+{
+  "name": "bcoder",
+  "displayName": "BCoder - AI Code Assistant",
+  "description": "An intelligent code assistant with completion and Q&A capabilities",
+  "version": "0.1.0",
+  "publisher": "bcoder",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/big91987/BCoder.git"
+  },
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Machine Learning",
+    "Other"
+  ],
+  "keywords": [
+    "ai",
+    "code completion",
+    "assistant",
+    "autocomplete",
+    "intellisense"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "bcoder.askQuestion",
+        "title": "Ask BCoder",
+        "category": "BCoder"
+      },
+      {
+        "command": "bcoder.explainCode",
+        "title": "Explain Code",
+        "category": "BCoder"
+      },
+      {
+        "command": "bcoder.generateCode",
+        "title": "Generate Code",
+        "category": "BCoder"
+      },
+      {
+        "command": "bcoder.toggleCompletion",
+        "title": "Toggle Auto Completion",
+        "category": "BCoder"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "bcoder.askQuestion",
+        "key": "ctrl+shift+q",
+        "mac": "cmd+shift+q"
+      },
+      {
+        "command": "bcoder.explainCode",
+        "key": "ctrl+shift+e",
+        "mac": "cmd+shift+e"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "bcoder.explainCode",
+          "when": "editorHasSelection",
+          "group": "bcoder"
+        },
+        {
+          "command": "bcoder.generateCode",
+          "group": "bcoder"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "bcoder.askQuestion"
+        },
+        {
+          "command": "bcoder.explainCode"
+        },
+        {
+          "command": "bcoder.generateCode"
+        },
+        {
+          "command": "bcoder.toggleCompletion"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "BCoder",
+      "properties": {
+        "bcoder.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable BCoder assistant"
+        },
+        "bcoder.autoCompletion": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable automatic code completion"
+        },
+        "bcoder.apiEndpoint": {
+          "type": "string",
+          "default": "",
+          "description": "API endpoint for AI service (leave empty for local mode)"
+        },
+        "bcoder.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key for AI service"
+        },
+        "bcoder.maxCompletionLength": {
+          "type": "number",
+          "default": 100,
+          "description": "Maximum length of code completion suggestions"
+        },
+        "bcoder.completionDelay": {
+          "type": "number",
+          "default": 500,
+          "description": "Delay in milliseconds before showing completion suggestions"
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "bcoder",
+          "title": "BCoder",
+          "icon": "$(robot)"
+        }
+      ]
+    },
+    "views": {
+      "bcoder": [
+        {
+          "id": "bcoderChat",
+          "name": "BCoder Chat"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@types/glob": "^8.1.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "16.x",
+    "@types/vscode": "^1.74.0",
+    "@typescript-eslint/eslint-plugin": "^5.45.0",
+    "@typescript-eslint/parser": "^5.45.0",
+    "@vscode/test-electron": "^2.2.0",
+    "@vscode/vsce": "^2.15.0",
+    "eslint": "^8.28.0",
+    "glob": "^11.0.2",
+    "mocha": "^11.5.0",
+    "typescript": "^4.9.4"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "vscode-languageclient": "^8.1.0",
+    "vscode-languageserver": "^8.1.0",
+    "vscode-languageserver-textdocument": "^1.0.8"
+  }
+}
