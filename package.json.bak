@@ -1,7 +1,7 @@
 {
   "name": "bcoder",
-  "displayName": "BCoder AI Assistant",
-  "description": "AI-powered code completion and chat assistant",
+  "displayName": "BCoder - AI Code Assistant",
+  "description": "An intelligent code assistant with completion and Q&A capabilities",
   "version": "0.1.0",
   "publisher": "bcoder",
   "repository": {
@@ -24,7 +24,7 @@
     "intellisense"
   ],
   "activationEvents": [
-    "*"
+    "onStartupFinished"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -48,13 +48,6 @@
         "command": "bcoder.toggleCompletion",
         "title": "Toggle Auto Completion",
         "category": "BCoder"
-      }
-,
-      {
-        "command": "bcoder.openSettings",
-        "title": "Open Settings",
-        "category": "BCoder",
-        "icon": "$(gear)"
       }
     ],
     "keybindings": [
@@ -93,16 +86,6 @@
         },
         {
           "command": "bcoder.toggleCompletion"
-        },
-        {
-          "command": "bcoder.openSettings"
-        }
-      ],
-      "view/title": [
-        {
-          "command": "bcoder.openSettings",
-          "when": "view == bcoderChat",
-          "group": "navigation"
         }
       ]
     },
@@ -121,12 +104,12 @@
         },
         "bcoder.apiEndpoint": {
           "type": "string",
-          "default": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
-          "description": "API endpoint for AI service"
+          "default": "",
+          "description": "API endpoint for AI service (leave empty for local mode)"
         },
         "bcoder.apiKey": {
           "type": "string",
-          "default": "e51c57a1-d4de-4572-8387-2a9dc93fff52",
+          "default": "",
           "description": "API key for AI service"
         },
         "bcoder.maxCompletionLength": {
@@ -154,7 +137,9 @@
       "bcoder": [
         {
           "id": "bcoderChat",
-          "name": "BCoder Chat"
+          "name": "BCoder Chat",
+          
+          
         }
       ]
     }

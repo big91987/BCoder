@@ -2,6 +2,10 @@ import * as vscode from 'vscode';
 import { CompletionProvider } from './completionProvider';
 import { ChatProvider } from './chatProvider';
 import { AIClient } from './utils/aiClient';
+import { logger } from './utils/logger';
+import { SettingsViewProvider } from './settingsView';
+import { SettingsPanel } from './settingsPanel';
+
 
 let completionProvider: CompletionProvider;
 let chatProvider: ChatProvider;
@@ -9,13 +13,17 @@ let aiClient: AIClient;
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('BCoder extension is now active!');
+    console.log('Extension URI:', context.extensionUri.toString());
 
     // Initialize AI client
+    console.log('Initializing AI client...');
     aiClient = new AIClient();
 
     // Initialize providers
+    console.log('Initializing providers...');
     completionProvider = new CompletionProvider(aiClient);
     chatProvider = new ChatProvider(aiClient);
+    console.log('Providers initialized successfully');
 
     // Register completion provider for all languages
     const completionDisposable = vscode.languages.registerCompletionItemProvider(
@@ -37,14 +45,33 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Register commands
     const askQuestionCommand = vscode.commands.registerCommand('bcoder.askQuestion', async () => {
+        logger.info('askQuestion command triggered');
+
         const question = await vscode.window.showInputBox({
             prompt: 'Ask BCoder a question about your code',
             placeHolder: 'How do I implement a binary search?'
         });
 
+        logger.info('User input question:', question || 'No question provided');
+
         if (question) {
-            const answer = await chatProvider.askQuestion(question);
-            vscode.window.showInformationMessage(answer);
+            try {
+                logger.info('Calling chatProvider.askQuestion...');
+                const answer = await chatProvider.askQuestion(question);
+                logger.info('Got answer from chatProvider, length:', answer.length);
+
+                // Show answer in a new document
+                const doc = await vscode.workspace.openTextDocument({
+                    content: `Question: ${question}\n\nAnswer:\n${answer}`,
+                    language: 'markdown'
+                });
+                await vscode.window.showTextDocument(doc);
+                logger.info('Answer displayed in new document');
+            } catch (error) {
+                logger.error('Error in askQuestion command:', error);
+                const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+                vscode.window.showErrorMessage(`BCoder Error: ${errorMessage}`);
+            }
         }
     });
 
@@ -63,14 +90,19 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
 
-        const explanation = await chatProvider.explainCode(selectedText);
+        try {
+            const explanation = await chatProvider.explainCode(selectedText);
 
-        // Show explanation in a new document
-        const doc = await vscode.workspace.openTextDocument({
-            content: `Code Explanation:\n\n${explanation}`,
-            language: 'markdown'
-        });
-        await vscode.window.showTextDocument(doc);
+            // Show explanation in a new document
+            const doc = await vscode.workspace.openTextDocument({
+                content: `Code Explanation:\n\n${explanation}`,
+                language: 'markdown'
+            });
+            await vscode.window.showTextDocument(doc);
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            vscode.window.showErrorMessage(`BCoder Error: ${errorMessage}`);
+        }
     });
 
     const generateCodeCommand = vscode.commands.registerCommand('bcoder.generateCode', async () => {
@@ -80,15 +112,22 @@ export function activate(context: vscode.ExtensionContext) {
         });
 
         if (prompt) {
-            const editor = vscode.window.activeTextEditor;
-            if (editor) {
-                const language = editor.document.languageId;
-                const generatedCode = await chatProvider.generateCode(prompt, language);
+            try {
+                const editor = vscode.window.activeTextEditor;
+                if (editor) {
+                    const language = editor.document.languageId;
+                    const generatedCode = await chatProvider.generateCode(prompt, language);
 
-                const position = editor.selection.active;
-                editor.edit(editBuilder => {
-                    editBuilder.insert(position, generatedCode);
-                });
+                    const position = editor.selection.active;
+                    editor.edit(editBuilder => {
+                        editBuilder.insert(position, generatedCode);
+                    });
+                } else {
+                    vscode.window.showErrorMessage('No active editor found. Please open a file first.');
+                }
+            } catch (error) {
+                const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+                vscode.window.showErrorMessage(`BCoder Error: ${errorMessage}`);
             }
         }
     });
@@ -103,9 +142,21 @@ export function activate(context: vscode.ExtensionContext) {
         );
     });
 
+    const openSettingsCommand = vscode.commands.registerCommand('bcoder.openSettings', () => {
+        SettingsPanel.createOrShow(context.extensionUri);
+    });
+
     // Register chat view provider
-    const chatViewProvider = new ChatViewProvider(context.extensionUri, chatProvider);
-    const chatViewDisposable = vscode.window.registerWebviewViewProvider('bcoderChat', chatViewProvider);
+    logger.info('Registering chat view provider...');
+    const chatViewProvider = new ChatTreeProvider();
+    const chatViewDisposable = vscode.window.registerTreeDataProvider('bcoderChat', chatViewProvider);
+    logger.info('Chat view provider registered successfully');
+
+    // Register settings view provider
+    logger.info('Registering settings view provider...');
+    const settingsViewProvider = new SettingsViewProvider(context.extensionUri);
+    const settingsViewDisposable = vscode.window.registerWebviewViewProvider('bcoderSettings', settingsViewProvider);
+    logger.info('Settings view provider registered successfully');
 
     // Add all disposables to context
     context.subscriptions.push(
@@ -114,111 +165,60 @@ export function activate(context: vscode.ExtensionContext) {
         explainCodeCommand,
         generateCodeCommand,
         toggleCompletionCommand,
-        chatViewDisposable
+        openSettingsCommand,
+        chatViewDisposable,
+        settingsViewDisposable
     );
 
     // Show welcome message
+    logger.info('Extension activation completed');
     vscode.window.showInformationMessage('BCoder AI Assistant is ready!');
 }
 
 export function deactivate() {
-    console.log('BCoder extension is now deactivated');
+    logger.info('BCoder extension is now deactivated');
+    logger.dispose();
 }
 
-class ChatViewProvider implements vscode.WebviewViewProvider {
+class ChatTreeProvider implements vscode.TreeDataProvider<ChatItem> {
+    constructor() {
+        logger.info('ChatTreeProvider constructor called');
+    }
+
+    getTreeItem(element: ChatItem): vscode.TreeItem {
+        return element;
+    }
+
+    getChildren(element?: ChatItem): Thenable<ChatItem[]> {
+        logger.info('getChildren called');
+        if (!element) {
+            // Root level items
+            return Promise.resolve([
+                new ChatItem('Ask Question', 'Click to ask a question', vscode.TreeItemCollapsibleState.None, 'bcoder.askQuestion'),
+                new ChatItem('Explain Code', 'Explain selected code', vscode.TreeItemCollapsibleState.None, 'bcoder.explainCode'),
+                new ChatItem('Generate Code', 'Generate new code', vscode.TreeItemCollapsibleState.None, 'bcoder.generateCode')
+            ]);
+        }
+        return Promise.resolve([]);
+    }
+}
+
+class ChatItem extends vscode.TreeItem {
     constructor(
-        private readonly _extensionUri: vscode.Uri,
-        private readonly _chatProvider: ChatProvider
-    ) {}
-
-    public resolveWebviewView(
-        webviewView: vscode.WebviewView,
-        context: vscode.WebviewViewResolveContext,
-        _token: vscode.CancellationToken,
+        public readonly label: string,
+        public readonly tooltip: string,
+        public readonly collapsibleState: vscode.TreeItemCollapsibleState,
+        public readonly commandId?: string
     ) {
-        webviewView.webview.options = {
-            enableScripts: true,
-            localResourceRoots: [this._extensionUri]
-        };
-
-        webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
-
-        webviewView.webview.onDidReceiveMessage(async (data) => {
-            switch (data.type) {
-                case 'askQuestion':
-                    const answer = await this._chatProvider.askQuestion(data.question);
-                    webviewView.webview.postMessage({
-                        type: 'response',
-                        answer: answer
-                    });
-                    break;
-            }
-        });
-    }
-
-    private _getHtmlForWebview(webview: vscode.Webview) {
-        return `<!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>BCoder Chat</title>
-            <style>
-                body { font-family: var(--vscode-font-family); padding: 10px; }
-                .chat-container { display: flex; flex-direction: column; height: 100%; }
-                .messages { flex: 1; overflow-y: auto; margin-bottom: 10px; }
-                .message { margin-bottom: 10px; padding: 8px; border-radius: 4px; }
-                .user-message { background-color: var(--vscode-input-background); }
-                .bot-message { background-color: var(--vscode-editor-background); }
-                .input-container { display: flex; gap: 5px; }
-                input { flex: 1; padding: 8px; }
-                button { padding: 8px 12px; }
-            </style>
-        </head>
-        <body>
-            <div class="chat-container">
-                <div class="messages" id="messages"></div>
-                <div class="input-container">
-                    <input type="text" id="questionInput" placeholder="Ask a question..." />
-                    <button onclick="sendMessage()">Send</button>
-                </div>
-            </div>
-            <script>
-                const vscode = acquireVsCodeApi();
-
-                function sendMessage() {
-                    const input = document.getElementById('questionInput');
-                    const question = input.value.trim();
-                    if (question) {
-                        addMessage(question, 'user');
-                        vscode.postMessage({ type: 'askQuestion', question: question });
-                        input.value = '';
-                    }
-                }
-
-                function addMessage(text, sender) {
-                    const messages = document.getElementById('messages');
-                    const messageDiv = document.createElement('div');
-                    messageDiv.className = 'message ' + sender + '-message';
-                    messageDiv.textContent = text;
-                    messages.appendChild(messageDiv);
-                    messages.scrollTop = messages.scrollHeight;
-                }
-
-                window.addEventListener('message', event => {
-                    const message = event.data;
-                    if (message.type === 'response') {
-                        addMessage(message.answer, 'bot');
-                    }
-                });
-
-                document.getElementById('questionInput').addEventListener('keypress', function(e) {
-                    if (e.key === 'Enter') {
-                        sendMessage();
-                    }
-                });
-            </script>
-        </body>
-        </html>`;
+        super(label, collapsibleState);
+        this.tooltip = tooltip;
+        if (commandId) {
+            this.command = {
+                command: commandId,
+                title: label
+            };
+        }
     }
 }
+
+

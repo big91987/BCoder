@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import { AIClient } from './utils/aiClient';
+import { promptManager } from './utils/promptManager';
+import { logger } from './utils/logger';
 
 export class ChatProvider {
     private aiClient: AIClient;
@@ -11,21 +13,28 @@ export class ChatProvider {
 
     async askQuestion(question: string): Promise<string> {
         try {
+            logger.info('ChatProvider.askQuestion called with question:', question);
+
             // Add user question to history
             this.conversationHistory.push({ role: 'user', content: question });
+            logger.info('Added question to conversation history');
 
             // Get current workspace context
             const workspaceContext = await this.getWorkspaceContext();
-            
-            // Prepare the prompt with context
-            const prompt = this.buildPrompt(question, workspaceContext);
-            
-            // Get AI response
-            const response = await this.aiClient.chat(prompt, this.conversationHistory);
-            
+            logger.info('Got workspace context:', workspaceContext);
+
+            // Prepare the prompt with context using PromptManager
+            const prompt = promptManager.getChatPrompt(question, workspaceContext);
+            logger.info('Generated prompt using PromptManager');
+
+            // Get AI response - pass the user question directly, not the full prompt
+            logger.info('Calling aiClient.chat...');
+            const response = await this.aiClient.chat(question, this.conversationHistory);
+            logger.info('Got response from aiClient, length:', response.length);
+
             // Add assistant response to history
             this.conversationHistory.push({ role: 'assistant', content: response });
-            
+
             // Limit conversation history to prevent token overflow
             if (this.conversationHistory.length > 20) {
                 this.conversationHistory = this.conversationHistory.slice(-20);
@@ -33,8 +42,9 @@ export class ChatProvider {
 
             return response;
         } catch (error) {
-            console.error('Error in askQuestion:', error);
-            return 'Sorry, I encountered an error while processing your question. Please try again.';
+            logger.error('Error in ChatProvider.askQuestion:', error);
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            return `Error: ${errorMessage}`;
         }
     }
 
@@ -42,48 +52,35 @@ export class ChatProvider {
         try {
             const activeEditor = vscode.window.activeTextEditor;
             const language = activeEditor?.document.languageId || 'unknown';
-            
-            const prompt = `Please explain the following ${language} code in detail:
 
-\`\`\`${language}
-${code}
-\`\`\`
-
-Provide a clear explanation that covers:
-1. What the code does
-2. How it works
-3. Any important concepts or patterns used
-4. Potential improvements or considerations`;
+            const prompt = promptManager.getExplainCodePrompt(code, language);
 
             const response = await this.aiClient.chat(prompt);
             return response;
         } catch (error) {
             console.error('Error in explainCode:', error);
-            return 'Sorry, I encountered an error while explaining the code. Please try again.';
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            return `Error: ${errorMessage}`;
         }
     }
 
     async generateCode(prompt: string, language: string): Promise<string> {
         try {
-            const fullPrompt = `Generate ${language} code for the following request:
-
-${prompt}
-
-Please provide clean, well-commented code that follows best practices for ${language}.
-Only return the code without additional explanations.`;
+            const fullPrompt = promptManager.getGenerateCodePrompt(prompt, language);
 
             const response = await this.aiClient.chat(fullPrompt);
-            
+
             // Extract code from response if it's wrapped in markdown
             const codeMatch = response.match(/```[\w]*\n([\s\S]*?)\n```/);
             if (codeMatch) {
                 return codeMatch[1];
             }
-            
+
             return response;
         } catch (error) {
             console.error('Error in generateCode:', error);
-            return `// Error generating code: ${error}`;
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            return `// Error: ${errorMessage}`;
         }
     }
 
@@ -91,7 +88,7 @@ Only return the code without additional explanations.`;
         try {
             const activeEditor = vscode.window.activeTextEditor;
             const language = activeEditor?.document.languageId || 'unknown';
-            
+
             const prompt = `I'm getting the following error in my ${language} code:
 
 Error: ${error}
@@ -115,7 +112,7 @@ Please suggest a fix for this error. Provide the corrected code and explain what
         try {
             const activeEditor = vscode.window.activeTextEditor;
             const language = activeEditor?.document.languageId || 'unknown';
-            
+
             const prompt = `Please optimize the following ${language} code for better performance, readability, and maintainability:
 
 \`\`\`${language}
@@ -132,16 +129,7 @@ Provide the optimized code along with explanations of the improvements made.`;
         }
     }
 
-    private buildPrompt(question: string, workspaceContext: string): string {
-        return `You are BCoder, an AI coding assistant. Help the user with their programming question.
 
-Current workspace context:
-${workspaceContext}
-
-User question: ${question}
-
-Please provide a helpful and accurate response. If the question is about code, provide examples when appropriate.`;
-    }
 
     private async getWorkspaceContext(): Promise<string> {
         try {
@@ -154,11 +142,11 @@ Please provide a helpful and accurate response. If the question is about code, p
             const language = document.languageId;
             const fileName = document.fileName;
             const lineCount = document.lineCount;
-            
+
             // Get current selection or cursor position
             const selection = activeEditor.selection;
             const currentLine = selection.active.line + 1;
-            
+
             // Get a snippet of the current file (around cursor position)
             const startLine = Math.max(0, currentLine - 10);
             const endLine = Math.min(lineCount, currentLine + 10);
