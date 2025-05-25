@@ -48,6 +48,39 @@ export class ChatProvider {
         }
     }
 
+    async askQuestionStream(question: string, onChunk: (chunk: string) => void): Promise<string> {
+        try {
+            logger.info('ChatProvider.askQuestionStream called with question:', question);
+
+            // Add user question to history
+            this.conversationHistory.push({ role: 'user', content: question });
+            logger.info('Added question to conversation history');
+
+            // Get current workspace context
+            const workspaceContext = await this.getWorkspaceContext();
+            logger.info('Got workspace context:', workspaceContext);
+
+            // Get AI response with streaming
+            logger.info('Calling aiClient.chatStream...');
+            const response = await this.aiClient.chatStream(question, this.conversationHistory, onChunk);
+            logger.info('Got complete response from aiClient, length:', response.length);
+
+            // Add assistant response to history
+            this.conversationHistory.push({ role: 'assistant', content: response });
+
+            // Limit conversation history to prevent token overflow
+            if (this.conversationHistory.length > 20) {
+                this.conversationHistory = this.conversationHistory.slice(-20);
+            }
+
+            return response;
+        } catch (error) {
+            logger.error('Error in ChatProvider.askQuestionStream:', error);
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            throw new Error(`Error: ${errorMessage}`);
+        }
+    }
+
     async explainCode(code: string): Promise<string> {
         try {
             const activeEditor = vscode.window.activeTextEditor;

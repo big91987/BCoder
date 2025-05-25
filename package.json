@@ -154,7 +154,8 @@
       "bcoder": [
         {
           "id": "bcoderChat",
-          "name": "BCoder Chat"
+          "name": "BCoder Chat",
+          "type": "webview"
         }
       ]
     }

@@ -5,6 +5,7 @@ import { AIClient } from './utils/aiClient';
 import { logger } from './utils/logger';
 import { SettingsViewProvider } from './settingsView';
 import { SettingsPanel } from './settingsPanel';
+import { ChatViewProvider } from './chatViewProvider';
 
 
 let completionProvider: CompletionProvider;
@@ -148,8 +149,8 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Register chat view provider
     logger.info('Registering chat view provider...');
-    const chatViewProvider = new ChatTreeProvider();
-    const chatViewDisposable = vscode.window.registerTreeDataProvider('bcoderChat', chatViewProvider);
+    const chatViewProvider = new ChatViewProvider(context.extensionUri, chatProvider);
+    const chatViewDisposable = vscode.window.registerWebviewViewProvider('bcoderChat', chatViewProvider);
     logger.info('Chat view provider registered successfully');
 
     // Register settings view provider
@@ -180,45 +181,6 @@ export function deactivate() {
     logger.dispose();
 }
 
-class ChatTreeProvider implements vscode.TreeDataProvider<ChatItem> {
-    constructor() {
-        logger.info('ChatTreeProvider constructor called');
-    }
 
-    getTreeItem(element: ChatItem): vscode.TreeItem {
-        return element;
-    }
-
-    getChildren(element?: ChatItem): Thenable<ChatItem[]> {
-        logger.info('getChildren called');
-        if (!element) {
-            // Root level items
-            return Promise.resolve([
-                new ChatItem('Ask Question', 'Click to ask a question', vscode.TreeItemCollapsibleState.None, 'bcoder.askQuestion'),
-                new ChatItem('Explain Code', 'Explain selected code', vscode.TreeItemCollapsibleState.None, 'bcoder.explainCode'),
-                new ChatItem('Generate Code', 'Generate new code', vscode.TreeItemCollapsibleState.None, 'bcoder.generateCode')
-            ]);
-        }
-        return Promise.resolve([]);
-    }
-}
-
-class ChatItem extends vscode.TreeItem {
-    constructor(
-        public readonly label: string,
-        public readonly tooltip: string,
-        public readonly collapsibleState: vscode.TreeItemCollapsibleState,
-        public readonly commandId?: string
-    ) {
-        super(label, collapsibleState);
-        this.tooltip = tooltip;
-        if (commandId) {
-            this.command = {
-                command: commandId,
-                title: label
-            };
-        }
-    }
-}
 
 
