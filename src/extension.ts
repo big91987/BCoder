@@ -6,11 +6,15 @@ import { logger } from './utils/logger';
 import { SettingsViewProvider } from './settingsView';
 import { SettingsPanel } from './settingsPanel';
 import { ChatViewProvider } from './chatViewProvider';
+import { createToolSystem, ToolSystem } from './tools';
+import { createAgentSystem, AgentSystem } from './agent';
 
 
 let completionProvider: CompletionProvider;
 let chatProvider: ChatProvider;
 let aiClient: AIClient;
+let toolSystem: ToolSystem;
+let agentSystem: AgentSystem;
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('BCoder extension is now active!');
@@ -20,10 +24,21 @@ export function activate(context: vscode.ExtensionContext) {
     console.log('Initializing AI client...');
     aiClient = new AIClient();
 
+    // Initialize tool system
+    console.log('Initializing tool system...');
+    toolSystem = createToolSystem(context);
+    console.log('Tool system initialized successfully');
+
+    // Initialize agent system
+    console.log('Initializing agent system...');
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+    agentSystem = createAgentSystem(toolSystem, aiClient, workspaceRoot);
+    console.log('Agent system initialized successfully');
+
     // Initialize providers
     console.log('Initializing providers...');
     completionProvider = new CompletionProvider(aiClient);
-    chatProvider = new ChatProvider(aiClient);
+    chatProvider = new ChatProvider(aiClient, toolSystem, agentSystem);
     console.log('Providers initialized successfully');
 
     // Register completion provider for all languages
@@ -178,6 +193,16 @@ export function activate(context: vscode.ExtensionContext) {
 
 export function deactivate() {
     logger.info('BCoder extension is now deactivated');
+
+    // Clean up systems
+    if (agentSystem) {
+        agentSystem.dispose();
+    }
+
+    if (toolSystem) {
+        toolSystem.dispose();
+    }
+
     logger.dispose();
 }
 
