@@ -168,7 +168,14 @@
     "lint": "eslint src --ext ts",
     "test": "node ./out/test/runTest.js",
     "package": "vsce package",
-    "publish": "vsce publish"
+    "publish": "vsce publish",
+    "test:all": "npm run compile && node out/test/runAllTests.js",
+    "test:tools": "npm run compile && node out/test/runAllTests.js tools",
+    "test:agent": "npm run compile && node out/test/runAllTests.js agent",
+    "test:integration": "npm run compile && node out/test/runAllTests.js integration",
+    "demo:tools": "npm run compile && node out/test/runAllTests.js demo",
+    "test:unit": "npm run test:tools && npm run test:agent",
+    "test:watch": "npm run compile && npm run test:all"
   },
   "devDependencies": {
     "@types/glob": "^8.1.0",
