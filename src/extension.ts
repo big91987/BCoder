@@ -162,11 +162,78 @@ export function activate(context: vscode.ExtensionContext) {
         SettingsPanel.createOrShow(context.extensionUri);
     });
 
+    // 添加日志查看命令
+    const showLogsCommand = vscode.commands.registerCommand('bcoder.showLogs', () => {
+        logger.show();
+    });
+
+    const dumpLogsCommand = vscode.commands.registerCommand('bcoder.dumpLogs', async () => {
+        const categories = ['chat', 'agent', 'tool', 'ai', 'security', 'performance'];
+        const selectedCategory = await vscode.window.showQuickPick(
+            ['all', ...categories],
+            { placeHolder: 'Select log category to dump' }
+        );
+
+        if (selectedCategory) {
+            const category = selectedCategory === 'all' ? undefined : selectedCategory as any;
+            const logs = logger.dumpLogs(category);
+
+            const doc = await vscode.workspace.openTextDocument({
+                content: logs,
+                language: 'log'
+            });
+            await vscode.window.showTextDocument(doc);
+        }
+    });
+
+    const clearLogsCommand = vscode.commands.registerCommand('bcoder.clearLogs', () => {
+        logger.clearLogs();
+        vscode.window.showInformationMessage('BCoder logs cleared');
+    });
+
+    const toggleDebugCommand = vscode.commands.registerCommand('bcoder.toggleDebug', () => {
+        const currentMode = logger.getRecentLogs().length > 0; // 简单检查
+        logger.setDebugMode(!currentMode);
+        vscode.window.showInformationMessage(`Debug mode ${!currentMode ? 'enabled' : 'disabled'}`);
+    });
+
+    // 添加缓存管理命令
+    const showCacheStatsCommand = vscode.commands.registerCommand('bcoder.showCacheStats', () => {
+        const { ChatCache } = require('./utils/chatCache');
+        const cache = ChatCache.getInstance();
+        const stats = cache.getCacheStats();
+
+        vscode.window.showInformationMessage(
+            `BCoder 聊天缓存统计:\n会话数: ${stats.sessionCount}\n消息总数: ${stats.totalMessages}\n缓存大小: ${stats.cacheSize}`
+        );
+    });
+
+    const clearCacheCommand = vscode.commands.registerCommand('bcoder.clearCache', async () => {
+        const choice = await vscode.window.showWarningMessage(
+            '确定要清空所有聊天记录吗？此操作不可撤销。',
+            '清空', '取消'
+        );
+
+        if (choice === '清空') {
+            const { ChatCache } = require('./utils/chatCache');
+            const cache = ChatCache.getInstance();
+            cache.clearAllCache();
+            vscode.window.showInformationMessage('聊天记录已清空');
+        }
+    });
+
+    const newChatSessionCommand = vscode.commands.registerCommand('bcoder.newChatSession', () => {
+        const { ChatCache } = require('./utils/chatCache');
+        const cache = ChatCache.getInstance();
+        cache.createNewSession();
+        vscode.window.showInformationMessage('已创建新的聊天会话');
+    });
+
     // Register chat view provider
-    logger.info('Registering chat view provider...');
-    const chatViewProvider = new ChatViewProvider(context.extensionUri, chatProvider);
+    logger.info('🔧 Registering chat view provider - NEW CACHE VERSION...');
+    const chatViewProvider = new ChatViewProvider(context.extensionUri, chatProvider, context);
     const chatViewDisposable = vscode.window.registerWebviewViewProvider('bcoderChat', chatViewProvider);
-    logger.info('Chat view provider registered successfully');
+    logger.info('✅ Chat view provider registered successfully - NEW CACHE VERSION');
 
     // Register settings view provider
     logger.info('Registering settings view provider...');
@@ -182,6 +249,13 @@ export function activate(context: vscode.ExtensionContext) {
         generateCodeCommand,
         toggleCompletionCommand,
         openSettingsCommand,
+        showLogsCommand,
+        dumpLogsCommand,
+        clearLogsCommand,
+        toggleDebugCommand,
+        showCacheStatsCommand,
+        clearCacheCommand,
+        newChatSessionCommand,
         chatViewDisposable,
         settingsViewDisposable
     );

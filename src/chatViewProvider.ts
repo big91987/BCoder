@@ -1,22 +1,36 @@
 import * as vscode from 'vscode';
 import { ChatProvider } from './chatProvider';
 import { logger } from './utils/logger';
+import { ChatCache, ChatMessage } from './utils/chatCache';
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'bcoderChat';
     private _view?: vscode.WebviewView;
-    private _chatHistory: Array<{role: 'user' | 'assistant', content: string, timestamp: Date}> = [];
+    private _chatCache: ChatCache;
 
     constructor(
         private readonly _extensionUri: vscode.Uri,
-        private readonly _chatProvider: ChatProvider
-    ) {}
+        private readonly _chatProvider: ChatProvider,
+        context: vscode.ExtensionContext
+    ) {
+        logger.info('🔧 ChatViewProvider constructor called - NEW VERSION');
+        this._chatCache = ChatCache.getInstance(context);
+        logger.info('✅ ChatViewProvider initialized with cache system');
+
+        // 立即检查缓存状态
+        const stats = this._chatCache.getCacheStats();
+        logger.info('📊 Cache stats on init:', stats);
+
+        const currentMessages = this._chatCache.getCurrentMessages();
+        logger.info(`💬 Current messages count: ${currentMessages.length}`);
+    }
 
     public resolveWebviewView(
         webviewView: vscode.WebviewView,
         context: vscode.WebviewViewResolveContext,
         _token: vscode.CancellationToken,
     ) {
+        logger.info('🌐 resolveWebviewView called - NEW VERSION');
         this._view = webviewView;
 
         webviewView.webview.options = {
@@ -26,6 +40,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
         webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
 
+        // 使用缓存系统恢复聊天记录 - 改进版
+        const restoreChat = () => {
+            const messages = this._chatCache.getCurrentMessages();
+            logger.info(`🔄 Attempting to restore ${messages.length} messages from cache`);
+
+            // 无论是否有消息都要调用 updateChatUI，确保界面正确初始化
+            this.updateChatUI();
+
+            if (messages.length > 0) {
+                logger.info(`✅ Successfully restored ${messages.length} messages from cache`);
+            } else {
+                logger.info(`📭 No messages to restore, showing empty state`);
+            }
+        };
+
+        // 更积极的恢复策略 - 多次尝试确保成功
+        setTimeout(() => restoreChat(), 50);   // 立即尝试
+        setTimeout(() => restoreChat(), 200);  // 短延迟
+        setTimeout(() => restoreChat(), 500);  // 中延迟
+        setTimeout(() => restoreChat(), 1000); // 长延迟
+        setTimeout(() => restoreChat(), 2000); // 最后尝试
+
         webviewView.webview.onDidReceiveMessage(async (data) => {
             switch (data.type) {
                 case 'sendMessage':
@@ -34,61 +70,59 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 case 'clearChat':
                     this.clearChat();
                     break;
+                case 'webviewReady':
+                    // webview 已完全加载，立即恢复聊天记录
+                    logger.info('🎯 Webview ready event received, restoring chat immediately');
+                    restoreChat();
+                    break;
             }
         });
     }
 
     private async handleUserMessage(message: string) {
+        logger.info('📝 handleUserMessage called - NEW VERSION:', message.substring(0, 50));
         if (!message.trim()) return;
 
-        // Add user message to history
-        this._chatHistory.push({
-            role: 'user',
-            content: message,
-            timestamp: new Date()
-        });
+        // Add user message to cache
+        logger.info('💾 Adding user message to cache');
+        this._chatCache.addMessage('user', message);
 
-        // Update UI to show user message
+        const messagesAfterAdd = this._chatCache.getCurrentMessages();
+        logger.info(`📊 Messages count after add: ${messagesAfterAdd.length}`);
+
         this.updateChatUI();
 
         try {
             // Show typing indicator
             this.showTypingIndicator();
 
-            // Create a placeholder for the assistant response
-            const assistantMessage = {
-                role: 'assistant' as const,
-                content: '',
-                timestamp: new Date()
-            };
-            this._chatHistory.push(assistantMessage);
+            // Create assistant message in cache
+            const assistantMessage = this._chatCache.addMessage('assistant', '');
 
             // Get AI response with streaming
             const response = await this._chatProvider.askQuestionStream(message, (chunk: string) => {
-                // Update the assistant message content with each chunk
-                assistantMessage.content += chunk;
-                this.updateChatUIStreaming();
+                // Update the assistant message content in cache
+                const messages = this._chatCache.getCurrentMessages();
+                const lastMessage = messages[messages.length - 1];
+                if (lastMessage && lastMessage.role === 'assistant') {
+                    lastMessage.content += chunk;
+                    this.updateChatUIStreaming();
+                }
             });
 
-            // Final update with complete response
-            assistantMessage.content = response;
+            // Final update with complete response - 直接更新缓存中的消息
+            const messages = this._chatCache.getCurrentMessages();
+            const lastMessage = messages[messages.length - 1];
+            if (lastMessage && lastMessage.role === 'assistant') {
+                lastMessage.content = response;
+            }
             this.updateChatUI();
 
         } catch (error) {
             logger.error('Error in chat:', error);
 
-            // Remove the incomplete assistant message if it exists
-            if (this._chatHistory.length > 0 && this._chatHistory[this._chatHistory.length - 1].role === 'assistant' && this._chatHistory[this._chatHistory.length - 1].content === '') {
-                this._chatHistory.pop();
-            }
-
-            // Add error message to history
-            this._chatHistory.push({
-                role: 'assistant',
-                content: `Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
-                timestamp: new Date()
-            });
-
+            // Add error message to cache
+            this._chatCache.addMessage('assistant', `Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
             this.updateChatUI();
         }
     }
@@ -103,26 +137,30 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     private updateChatUI() {
         if (this._view) {
+            const messages = this._chatCache.getCurrentMessages();
             this._view.webview.postMessage({
                 type: 'updateChat',
-                history: this._chatHistory
+                history: messages
             });
         }
     }
 
     private updateChatUIStreaming() {
         if (this._view) {
+            const messages = this._chatCache.getCurrentMessages();
             this._view.webview.postMessage({
                 type: 'updateChatStreaming',
-                history: this._chatHistory
+                history: messages
             });
         }
     }
 
     private clearChat() {
-        this._chatHistory = [];
+        this._chatCache.clearCurrentSession();
         this.updateChatUI();
     }
+
+
 
     private _getHtmlForWebview(webview: vscode.Webview) {
         return `<!DOCTYPE html>
@@ -333,6 +371,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             <script>
                 const vscode = acquireVsCodeApi();
                 let isTyping = false;
+
+                // 通知扩展 webview 已准备就绪
+                window.addEventListener('load', function() {
+                    setTimeout(() => {
+                        vscode.postMessage({ type: 'webviewReady' });
+                    }, 100);
+                });
 
                 // Auto-resize textarea
                 const messageInput = document.getElementById('messageInput');

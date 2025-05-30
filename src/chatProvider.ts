@@ -5,17 +5,20 @@ import { logger } from './utils/logger';
 import { ToolSystem } from './tools';
 import { ToolCall, ToolResult } from './tools/types';
 import { AgentSystem, AgentCallbacks } from './agent';
+import { AgentMessage, DefaultMessageFormatter, MessageFormatter } from './agent/messaging';
 
 export class ChatProvider {
     private aiClient: AIClient;
     private conversationHistory: Array<{role: 'user' | 'assistant', content: string}> = [];
     private toolSystem: ToolSystem | null = null;
     private agentSystem: AgentSystem | null = null;
+    private messageFormatter: MessageFormatter;
 
-    constructor(aiClient: AIClient, toolSystem?: ToolSystem, agentSystem?: AgentSystem) {
+    constructor(aiClient: AIClient, toolSystem?: ToolSystem, agentSystem?: AgentSystem, messageFormatter?: MessageFormatter) {
         this.aiClient = aiClient;
         this.toolSystem = toolSystem || null;
         this.agentSystem = agentSystem || null;
+        this.messageFormatter = messageFormatter || new DefaultMessageFormatter();
     }
 
     async askQuestion(question: string): Promise<string> {
@@ -30,26 +33,30 @@ export class ChatProvider {
             const workspaceContext = await this.getWorkspaceContext();
             logger.info('Got workspace context:', workspaceContext);
 
-            // Check if this is an agent workflow request
-            if (this.agentSystem && this.shouldUseAgent(question)) {
-                return await this.handleAgentRequest(question, workspaceContext);
+            // 直接交给 Agent 系统处理 - 让 Agent 自己决定是否使用工具
+            if (this.agentSystem) {
+                const sessionId = `chat_${Date.now()}`;
+                logger.startTimer(sessionId);
+                logger.chatDebug('Routing to Agent system', {}, sessionId);
+
+                const response = await this.handleAgentRequest(question, workspaceContext, sessionId);
+                logger.endTimer(sessionId, 'AgentRequest');
+                return response;
             }
 
-            // Check if this is a tool-related request
-            if (this.toolSystem && this.shouldUseTool(question)) {
+            // 如果没有 Agent 系统，尝试工具调用
+            if (this.toolSystem) {
                 return await this.handleToolRequest(question, workspaceContext);
             }
 
-            // Prepare the prompt with context using PromptManager
+            // 最后才是普通聊天
             const prompt = promptManager.getChatPrompt(question, workspaceContext);
             logger.info('Generated prompt using PromptManager');
 
-            // Get AI response - pass the user question directly, not the full prompt
             logger.info('Calling aiClient.chat...');
             const response = await this.aiClient.chat(question, this.conversationHistory);
             logger.info('Got response from aiClient, length:', response.length);
 
-            // Add assistant response to history
             this.conversationHistory.push({ role: 'assistant', content: response });
 
             // Limit conversation history to prevent token overflow
@@ -66,23 +73,50 @@ export class ChatProvider {
     }
 
     async askQuestionStream(question: string, onChunk: (chunk: string) => void): Promise<string> {
+        const sessionId = `chat_stream_${Date.now()}`;
+        logger.startTimer(sessionId);
+
         try {
-            logger.info('ChatProvider.askQuestionStream called with question:', question);
+            logger.chatUserInput(question, { sessionId, streaming: true });
 
             // Add user question to history
             this.conversationHistory.push({ role: 'user', content: question });
-            logger.info('Added question to conversation history');
+            logger.chatDebug('Added user message to conversation history', {
+                historyLength: this.conversationHistory.length
+            }, sessionId);
 
             // Get current workspace context
             const workspaceContext = await this.getWorkspaceContext();
-            logger.info('Got workspace context:', workspaceContext);
+            logger.chatDebug('Workspace context collected', {
+                contextLength: workspaceContext.length
+            }, sessionId);
 
-            // Get AI response with streaming
-            logger.info('Calling aiClient.chatStream...');
+            // 优先使用 Agent 系统处理流式请求
+            if (this.agentSystem) {
+                logger.chatDebug('Routing to Agent system (streaming)', {}, sessionId);
+                const response = await this.handleAgentRequestStream(question, workspaceContext, sessionId, onChunk);
+                logger.endTimer(sessionId, 'AgentStreamRequest');
+                return response;
+            }
+
+            // 如果没有 Agent 系统，尝试工具调用
+            if (this.toolSystem) {
+                logger.chatDebug('Routing to Tool system (streaming)', {}, sessionId);
+                const response = await this.handleToolRequestStream(question, workspaceContext, sessionId, onChunk);
+                logger.endTimer(sessionId, 'ToolStreamRequest');
+                return response;
+            }
+
+            // 最后才是普通流式聊天
+            logger.chatDebug('Routing to AI chat (streaming)', {}, sessionId);
+            logger.ai('Calling AI client for streaming chat', {
+                question: question.substring(0, 50),
+                historyLength: this.conversationHistory.length
+            }, sessionId);
+
             const response = await this.aiClient.chatStream(question, this.conversationHistory, onChunk);
-            logger.info('Got complete response from aiClient, length:', response.length);
 
-            // Add assistant response to history
+            logger.chatAIResponse(response, { sessionId, streaming: true });
             this.conversationHistory.push({ role: 'assistant', content: response });
 
             // Limit conversation history to prevent token overflow
@@ -90,9 +124,11 @@ export class ChatProvider {
                 this.conversationHistory = this.conversationHistory.slice(-20);
             }
 
+            logger.endTimer(sessionId, 'AIStreamChat');
             return response;
         } catch (error) {
-            logger.error('Error in ChatProvider.askQuestionStream:', error);
+            logger.error('Error in ChatProvider.askQuestionStream:', error, { sessionId });
+            logger.endTimer(sessionId, 'StreamError');
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
             throw new Error(`Error: ${errorMessage}`);
         }
@@ -239,66 +275,162 @@ ${snippet}
         this.agentSystem = agentSystem;
     }
 
-    /**
-     * 判断是否应该使用 Agent 工作流
-     */
-    private shouldUseAgent(question: string): boolean {
-        const agentKeywords = [
-            'implement', 'create', 'build', 'develop', 'refactor',
-            'fix bug', 'add feature', 'optimize', 'improve',
-            '实现', '创建', '构建', '开发', '重构',
-            '修复', '添加功能', '优化', '改进',
-            'task', 'project', 'workflow', 'automation',
-            '任务', '项目', '工作流', '自动化'
-        ];
 
-        const question_lower = question.toLowerCase();
-        return agentKeywords.some(keyword =>
-            question_lower.includes(keyword.toLowerCase())
-        ) || question.length > 50; // 长问题通常需要工作流处理
-    }
 
     /**
-     * 处理 Agent 工作流请求
+     * 处理 Agent 工作流请求 - 流式版本
      */
-    private async handleAgentRequest(question: string, workspaceContext: string): Promise<string> {
+    private async handleAgentRequestStream(question: string, workspaceContext: string, sessionId: string, onChunk: (chunk: string) => void): Promise<string> {
         try {
-            logger.info('Handling agent workflow request:', question);
+            logger.chat('Handling agent workflow request (streaming)', {
+                question: question.substring(0, 100),
+                contextLength: workspaceContext.length
+            }, sessionId);
 
-            // 创建 Agent 回调
-            const callbacks: AgentCallbacks = {
+            let responseContent = '';
+
+            // 创建流式回调包装器 - 实时显示执行过程
+            const streamingCallbacks: AgentCallbacks = {
                 onTaskStarted: (task) => {
-                    logger.info(`🚀 Agent 开始任务: ${task.description}`);
+                    const startMsg = `🚀 **开始任务**: ${task.description}\n\n`;
+                    responseContent += startMsg;
+                    onChunk(startMsg);
+                    logger.agentTaskStart(task.id, task.description, { sessionId });
                 },
 
-                onTaskCompleted: (task, reflection) => {
-                    logger.info(`✅ Agent 完成任务: ${task.id}, 成功: ${reflection.success}`);
-                },
-
-                onTaskFailed: (task, error) => {
-                    logger.error(`❌ Agent 任务失败: ${task.id}, 错误: ${error}`);
+                onPlanCreated: (plan) => {
+                    const planMsg = `📋 **执行计划**:\n${plan.steps.map((step, i) => `${i + 1}. ${step.description}`).join('\n')}\n\n`;
+                    responseContent += planMsg;
+                    onChunk(planMsg);
+                    logger.agentDebug('Plan created', { stepsCount: plan.steps.length }, sessionId);
                 },
 
                 onStepStarted: (step) => {
-                    logger.debug(`🔧 执行步骤: ${step.description}`);
+                    const stepMsg = `⚡ **执行步骤**: ${step.description}\n`;
+                    responseContent += stepMsg;
+                    onChunk(stepMsg);
+                    logger.agentStep(sessionId, step.id, step.description);
                 },
 
                 onStepCompleted: (step, result) => {
-                    logger.debug(`${result.success ? '✅' : '❌'} 步骤完成: ${step.id}`);
+                    const resultMsg = result.success
+                        ? `✅ **步骤完成**: ${step.description}\n`
+                        : `❌ **步骤失败**: ${step.description} - ${result.error}\n`;
+                    responseContent += resultMsg;
+                    onChunk(resultMsg);
+                    logger.agentStep(sessionId, step.id, `completed: ${result.success}`, { result: result.success });
                 },
 
                 onProgress: (progress, message) => {
-                    logger.info(`📊 进度: ${progress.toFixed(1)}% - ${message}`);
+                    const progressMsg = `📊 **进度**: ${progress.toFixed(1)}% - ${message}\n`;
+                    responseContent += progressMsg;
+                    onChunk(progressMsg);
+                    logger.performance(`Agent progress: ${progress}%`, { progress, message }, sessionId);
+                },
+
+                onTaskCompleted: (task, reflection) => {
+                    const completionMsg = `\n🎉 **任务完成**!\n\n`;
+                    responseContent += completionMsg;
+                    onChunk(completionMsg);
+                    logger.agentTaskEnd(task.id, reflection.success, { sessionId });
+                },
+
+                onTaskFailed: (task, error) => {
+                    const errorMsg = `\n❌ **任务失败**: ${error}\n\n`;
+                    responseContent += errorMsg;
+                    onChunk(errorMsg);
+                    logger.agentTaskEnd(task.id, false, { error, sessionId });
+                }
+            };
+
+            // 使用 Agent 系统处理请求
+            const result = await this.agentSystem!.processRequest(question, streamingCallbacks);
+
+            // 如果没有通过消息流生成内容，使用默认结果并发送
+            if (!responseContent && result) {
+                responseContent = result;
+                onChunk(result);
+            }
+
+            // 添加到历史记录
+            this.conversationHistory.push({ role: 'assistant', content: responseContent || result });
+
+            return responseContent || result;
+        } catch (error) {
+            logger.error('Error handling agent request (streaming):', error, { sessionId });
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            const errorResponse = `Agent 工作流执行出错: ${errorMessage}`;
+            onChunk(errorResponse);
+            return errorResponse;
+        }
+    }
+
+    /**
+     * 处理 Agent 工作流请求 - 使用新的消息流架构
+     */
+    private async handleAgentRequest(question: string, workspaceContext: string, sessionId: string): Promise<string> {
+        try {
+            logger.chat('Handling agent workflow request', {
+                question: question.substring(0, 100),
+                contextLength: workspaceContext.length
+            }, sessionId);
+
+            let responseContent = '';
+
+            // 使用新的消息流回调
+            const callbacks: AgentCallbacks = {
+                // 新的消息流回调
+                onMessage: (message: AgentMessage) => {
+                    const formattedMessage = this.messageFormatter.formatMessage(message);
+                    responseContent += formattedMessage;
+                    logger.debug(`Agent message: ${message.type} - ${message.content}`);
+                },
+
+                onComplete: (result: string) => {
+                    logger.info('Agent task completed');
+                },
+
+                onError: (error: string) => {
+                    responseContent += `❌ **错误**: ${error}\n`;
+                    logger.error('Agent error:', error);
+                },
+
+                // 保持传统回调以支持现有的 Agent 实现
+                onTaskStarted: (task) => {
+                    logger.info(`Agent 开始任务: ${task.description}`);
+                },
+
+                onTaskCompleted: (task, reflection) => {
+                    logger.info(`Agent 完成任务: ${task.id}, 成功: ${reflection.success}`);
+                },
+
+                onTaskFailed: (task, error) => {
+                    logger.error(`Agent 任务失败: ${task.id}, 错误: ${error}`);
+                },
+
+                onStepStarted: (step) => {
+                    logger.debug(`执行步骤: ${step.description}`);
+                },
+
+                onStepCompleted: (step, result) => {
+                    logger.debug(`步骤完成: ${step.id}, 成功: ${result.success}`);
+                },
+
+                onProgress: (progress, message) => {
+                    logger.info(`进度: ${progress.toFixed(1)}% - ${message}`);
                 }
             };
 
             // 使用 Agent 系统处理请求
             const result = await this.agentSystem!.processRequest(question, callbacks);
 
-            // 添加到历史记录
-            this.conversationHistory.push({ role: 'assistant', content: result });
+            // 如果没有通过消息流生成内容，使用默认结果
+            const finalResponse = responseContent || result;
 
-            return result;
+            // 添加到历史记录
+            this.conversationHistory.push({ role: 'assistant', content: finalResponse });
+
+            return finalResponse;
         } catch (error) {
             logger.error('Error handling agent request:', error);
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -306,22 +438,62 @@ ${snippet}
         }
     }
 
-    /**
-     * 判断是否应该使用工具
-     */
-    private shouldUseTool(question: string): boolean {
-        const toolKeywords = [
-            'read file', 'write file', 'edit file', 'create file',
-            'list files', 'search files', 'find files',
-            'create directory', 'delete file', 'move file',
-            '读取文件', '写入文件', '编辑文件', '创建文件',
-            '列出文件', '搜索文件', '查找文件',
-            '创建目录', '删除文件', '移动文件'
-        ];
 
-        return toolKeywords.some(keyword =>
-            question.toLowerCase().includes(keyword.toLowerCase())
-        );
+
+    /**
+     * 处理工具请求 - 流式版本
+     */
+    private async handleToolRequestStream(question: string, workspaceContext: string, sessionId: string, onChunk: (chunk: string) => void): Promise<string> {
+        try {
+            logger.chat('Handling tool request (streaming)', {
+                question: question.substring(0, 100)
+            }, sessionId);
+
+            // 构建包含工具定义的提示词
+            const toolDefinitions = this.toolSystem!.getToolDefinitions();
+            const systemPrompt = this.buildToolSystemPrompt(toolDefinitions, workspaceContext);
+
+            // 准备消息历史，包含工具定义
+            const messages = [
+                { role: 'system' as const, content: systemPrompt },
+                ...this.conversationHistory.slice(-10), // 保留最近10条对话
+                { role: 'user' as const, content: question }
+            ];
+
+            // 调用 AI 获取工具调用（流式）
+            const response = await this.aiClient.chatStream(question, messages, onChunk);
+
+            // 尝试解析工具调用
+            const toolCalls = this.parseToolCalls(response);
+
+            if (toolCalls.length > 0) {
+                logger.chatDebug('Tool calls detected', { toolCallsCount: toolCalls.length }, sessionId);
+
+                // 执行工具调用
+                const toolResults = await this.executeToolCalls(toolCalls);
+
+                // 生成最终响应
+                const finalResponse = await this.generateToolResponse(question, toolCalls, toolResults);
+
+                // 发送工具执行结果
+                onChunk('\n\n' + finalResponse);
+
+                // 添加到历史记录
+                this.conversationHistory.push({ role: 'assistant', content: response + '\n\n' + finalResponse });
+
+                return response + '\n\n' + finalResponse;
+            } else {
+                // 没有工具调用，返回普通响应
+                this.conversationHistory.push({ role: 'assistant', content: response });
+                return response;
+            }
+        } catch (error) {
+            logger.error('Error handling tool request (streaming):', error, { sessionId });
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            const errorResponse = `工具执行出错: ${errorMessage}`;
+            onChunk(errorResponse);
+            return errorResponse;
+        }
     }
 
     /**
