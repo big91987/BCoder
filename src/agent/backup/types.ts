@@ -178,19 +178,13 @@ export type AgentEventType =
     | 'reflection_completed'
     | 'user_intervention_required';
 
-// 导入新的消息接口
-import { AgentMessageCallbacks } from './messaging';
-
-// Agent 回调接口 - 保持向后兼容，同时支持新的消息流
-export interface AgentCallbacks extends AgentMessageCallbacks {
-    // 传统回调 - 保持向后兼容
+// Agent 回调接口
+export interface AgentCallbacks {
     onTaskStarted?: (task: Task) => void;
     onTaskCompleted?: (task: Task, reflection: Reflection) => void;
     onTaskFailed?: (task: Task, error: string) => void;
-    onPlanCreated?: (plan: Plan) => void;
     onStepStarted?: (step: PlanStep) => void;
     onStepCompleted?: (step: PlanStep, result: ActionResult) => void;
     onUserInterventionRequired?: (reason: string, context: any) => Promise<boolean>;
-
-    // 新的消息流回调已在 AgentMessageCallbacks 中定义
+    onProgress?: (progress: number, message: string) => void;
 }

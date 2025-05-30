@@ -94,7 +94,13 @@ suite('ChatProvider Test Suite', () => {
 
     setup(() => {
         aiClient = new AIClient();
-        chatProvider = new ChatProvider(aiClient);
+        // 创建一个模拟的 AgentManager
+        const mockAgentManager = {
+            getCurrentAgent: () => null,
+            initializeDefault: async () => {},
+            dispose: async () => {}
+        };
+        chatProvider = new ChatProvider(mockAgentManager as any);
     });
 
     test('ChatProvider should initialize', () => {

@@ -7,7 +7,7 @@ import { SettingsViewProvider } from './settingsView';
 import { SettingsPanel } from './settingsPanel';
 import { ChatViewProvider } from './chatViewProvider';
 import { createToolSystem, ToolSystem } from './tools';
-import { createAgentSystem, AgentSystem } from './agent';
+import { AgentSystem } from './agent';
 
 
 let completionProvider: CompletionProvider;
@@ -16,7 +16,7 @@ let aiClient: AIClient;
 let toolSystem: ToolSystem;
 let agentSystem: AgentSystem;
 
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext) {
     console.log('BCoder extension is now active!');
     console.log('Extension URI:', context.extensionUri.toString());
 
@@ -32,13 +32,18 @@ export function activate(context: vscode.ExtensionContext) {
     // Initialize agent system
     console.log('Initializing agent system...');
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
-    agentSystem = createAgentSystem(toolSystem, aiClient, workspaceRoot);
+    agentSystem = new AgentSystem(toolSystem, aiClient, workspaceRoot);
     console.log('Agent system initialized successfully');
 
-    // Initialize providers
+    // AgentSystem 内部已经创建了 AgentManager，不需要重复创建
+    console.log('Agent manager initialized via AgentSystem');
+
     console.log('Initializing providers...');
     completionProvider = new CompletionProvider(aiClient);
-    chatProvider = new ChatProvider(aiClient, toolSystem, agentSystem);
+
+    // Use new ChatProvider architecture - 使用 AgentSystem 内部的 AgentManager
+    const { ChatProvider } = require('./chatProvider');
+    chatProvider = new ChatProvider(agentSystem.getAgentManager());
     console.log('Providers initialized successfully');
 
     // Register completion provider for all languages

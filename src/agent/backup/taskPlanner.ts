@@ -38,7 +38,7 @@ export class TaskPlanner {
         // 对于复杂任务，进行分解
         if (this.isComplexTask(userRequest)) {
             task.subtasks = await this.decomposeTask(userRequest, context);
-            task.estimatedSteps = task.subtasks.reduce((sum, subtask) =>
+            task.estimatedSteps = task.subtasks.reduce((sum, subtask) => 
                 sum + (subtask.estimatedSteps || 1), 0);
         } else {
             task.estimatedSteps = this.estimateSteps(userRequest, taskType);
@@ -56,7 +56,7 @@ export class TaskPlanner {
 
         const planPrompt = this.buildPlanningPrompt(task, context);
         const planResponse = await this.aiClient.chat(planPrompt);
-
+        
         const steps = await this.parsePlanSteps(planResponse, task, context);
         const requiredTools = this.extractRequiredTools(steps);
         const riskAssessment = this.assessRisk(task, steps);
@@ -103,7 +103,7 @@ export class TaskPlanner {
     private determinePriority(userRequest: string, taskType: TaskType): TaskPriority {
         const request = userRequest.toLowerCase();
 
-        if (request.includes('urgent') || request.includes('critical') ||
+        if (request.includes('urgent') || request.includes('critical') || 
             request.includes('紧急') || request.includes('严重')) {
             return 'critical';
         } else if (request.includes('important') || request.includes('high') ||
@@ -159,7 +159,7 @@ ${JSON.stringify(context, null, 2)}
   },
   {
     "description": "实现核心功能",
-    "type": "feature_implementation",
+    "type": "feature_implementation", 
     "estimatedSteps": 5
   }
 ]
@@ -168,7 +168,7 @@ ${JSON.stringify(context, null, 2)}
         try {
             const response = await this.aiClient.chat(decompositionPrompt);
             const subtasksData = this.parseJsonResponse(response);
-
+            
             return subtasksData.map((data: any, index: number) => ({
                 id: `subtask_${this.taskCounter}_${index + 1}`,
                 description: data.description,
@@ -220,30 +220,45 @@ ${JSON.stringify(context, null, 2)}
      */
     private buildPlanningPrompt(task: Task, context: AgentContext): string {
         return `
-任务: ${task.description}
+你是一个智能编程助手，需要为以下任务创建详细的执行计划：
 
-工作区: ${context.workspaceRoot}
+任务信息:
+- ID: ${task.id}
+- 描述: ${task.description}
+- 类型: ${task.type}
+- 优先级: ${task.priority}
+
+工作区上下文:
+- 根目录: ${context.workspaceRoot}
+- 当前文件: ${context.activeFile || '无'}
+- 项目类型: ${context.projectStructure?.type || '未知'}
+- Git状态: ${context.gitStatus ? `${context.gitStatus.branch}分支, 有变更: ${context.gitStatus.hasChanges}` : '无Git信息'}
 
 可用工具:
-- read_file: 读取文件内容，参数: {"path": "文件路径"}
-- write_file: 写入文件，参数: {"path": "文件路径", "content": "文件内容"}
-- edit_file: 编辑文件，参数: {"path": "文件路径", "old_text": "要替换的文本", "new_text": "新文本"}
-- list_files: 列出目录，参数: {"path": "目录路径", "recursive": true/false}
-- search_files: 搜索文件，参数: {"pattern": "*.js", "directory": "目录", "recursive": true}
-- search_in_files: 搜索内容，参数: {"query": "搜索词", "directory": "目录", "file_pattern": "*.js"}
+- read_file: 读取文件内容
+- write_file: 写入文件
+- edit_file: 编辑文件
+- list_files: 列出目录文件
+- search_files: 搜索文件
+- search_in_files: 在文件中搜索内容
+- create_directory: 创建目录
+- move_file: 移动文件
+- delete_file: 删除文件
 
-请直接返回执行步骤的JSON数组，不要其他解释：
+请创建一个详细的执行计划，包含具体的步骤。每个步骤应该包含：
+1. 描述 - 步骤的详细说明
+2. 工具 - 需要使用的工具列表
+3. 参数 - 工具调用的参数
 
-示例1 - 如果用户说"读取package.json文件":
-[{"description": "读取package.json文件", "action": "read_file", "tools": ["read_file"], "parameters": {"path": "package.json"}}]
-
-示例2 - 如果用户说"创建hello.js文件":
-[{"description": "创建hello.js文件", "action": "write_file", "tools": ["write_file"], "parameters": {"path": "hello.js", "content": "console.log('Hello World');"}}]
-
-示例3 - 如果用户说"列出src目录":
-[{"description": "列出src目录文件", "action": "list_files", "tools": ["list_files"], "parameters": {"path": "src", "recursive": false}}]
-
-现在为这个任务创建执行步骤:
+请以JSON格式返回计划步骤：
+[
+  {
+    "description": "步骤描述",
+    "action": "工具名称",
+    "tools": ["tool1", "tool2"],
+    "parameters": {"param1": "value1"}
+  }
+]
 `;
     }
 
@@ -253,7 +268,7 @@ ${JSON.stringify(context, null, 2)}
     private async parsePlanSteps(planResponse: string, task: Task, context: AgentContext): Promise<PlanStep[]> {
         try {
             const stepsData = this.parseJsonResponse(planResponse);
-
+            
             return stepsData.map((data: any, index: number) => ({
                 id: `step_${task.id}_${index + 1}`,
                 description: data.description,
@@ -346,8 +361,8 @@ ${JSON.stringify(context, null, 2)}
         let riskLevel: 'low' | 'medium' | 'high' = 'low';
 
         // 检查文件操作风险
-        const hasFileWrites = steps.some(step =>
-            step.tools.includes('write_file') ||
+        const hasFileWrites = steps.some(step => 
+            step.tools.includes('write_file') || 
             step.tools.includes('edit_file') ||
             step.tools.includes('delete_file')
         );
@@ -405,7 +420,7 @@ ${JSON.stringify(context, null, 2)}
         };
 
         let steps = baseSteps[taskType] || 2;
-
+        
         // 根据请求长度调整
         if (userRequest.length > 100) {
             steps += 1;
@@ -427,7 +442,7 @@ ${JSON.stringify(context, null, 2)}
             if (jsonMatch) {
                 return JSON.parse(jsonMatch[0]);
             }
-
+            
             // 如果没有找到JSON，返回空数组
             return [];
         } catch (error) {
