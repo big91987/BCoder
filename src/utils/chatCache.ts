@@ -304,15 +304,35 @@ export class ChatCache {
     }
 
     /**
-     * 清空当前会话
+     * 清空当前会话 - 彻底删除所有数据
      */
     public clearCurrentSession(): void {
-        if (this.currentSession) {
-            this.currentSession.messages = [];
-            this.currentSession.updatedAt = new Date();
-            this.saveSession(this.currentSession);
-            logger.info('Current session cleared');
+        logger.info('🗑️ Starting clearCurrentSession - COMPLETE CLEANUP');
+
+        // 1. 删除所有会话文件（彻底清理）
+        try {
+            const sessionFiles = fs.readdirSync(this.cacheDir);
+            sessionFiles.forEach(file => {
+                if (file.endsWith('.json')) {
+                    const filePath = path.join(this.cacheDir, file);
+                    fs.unlinkSync(filePath);
+                    logger.info(`🗑️ Deleted session file: ${file}`);
+                }
+            });
+        } catch (error) {
+            logger.error('Failed to delete session files:', error);
         }
+
+        // 2. 清除 VSCode 全局状态
+        this.context.globalState.update('currentChatSessionId', undefined);
+        logger.info('🗑️ Cleared currentChatSessionId from global state');
+
+        // 3. 重置当前会话
+        this.currentSession = null;
+
+        // 4. 创建新的空会话
+        this.createNewSession();
+        logger.info('🗑️ Created new empty session after complete clear');
     }
 
     /**

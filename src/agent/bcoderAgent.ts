@@ -1,7 +1,8 @@
-import { IAgent, AgentConfig, AgentRequest, AgentResponse, AgentCallbacks, AgentMessage } from './agentInterface';
+import { IAgent, AgentConfig, AgentRequest, AgentResponse, AgentCallbacks } from './agentInterface';
 import { ToolSystem } from '../tools';
 import { AIClient } from '../utils/aiClient';
 import { logger } from '../utils/logger';
+import { StandardMessage, MessageRole, MessageType, MessageFactory, MessageBuilder } from '../types/message';
 
 /**
  * BCoder 默认 Agent 实现
@@ -124,10 +125,22 @@ export class BCoderAgent implements IAgent {
         logger.info(JSON.stringify(availableTools, null, 2));
 
         const toolDescriptions = availableTools.map((tool: any) => {
-            // 工具定义格式：{ type: "function", function: { name: "...", description: "..." } }
+            // 工具定义格式：{ type: "function", function: { name: "...", description: "...", parameters: {...} } }
             const name = tool.function?.name || tool.name || 'UNKNOWN_NAME';
             const description = tool.function?.description || tool.description || 'UNKNOWN_DESCRIPTION';
-            return `- ${name}: ${description}`;
+            const parameters = tool.function?.parameters || {};
+
+            // 构建参数描述
+            let paramDesc = '';
+            if (parameters.properties) {
+                const paramList = Object.entries(parameters.properties).map(([paramName, paramInfo]: [string, any]) => {
+                    const required = parameters.required?.includes(paramName) ? ' (必需)' : ' (可选)';
+                    return `    - ${paramName}: ${paramInfo.description}${required}`;
+                }).join('\n');
+                paramDesc = `\n  参数:\n${paramList}`;
+            }
+
+            return `- ${name}: ${description}${paramDesc}`;
         }).join('\n');
 
         logger.info('Tool descriptions string:');
@@ -159,6 +172,11 @@ JSON 输出格式：
   "thought": "基于已有信息的分析",
   "final_answer": "完整的最终答案"
 }
+
+示例：
+- 读取文件: {"action": "read_file", "action_input": {"path": "/path/to/file"}}
+- 列出目录: {"action": "list_files", "action_input": {"path": "/path/to/directory"}}
+- 搜索文件: {"action": "search_files", "action_input": {"pattern": "*.js"}}
 
 重要：
 - 必须输出有效的 JSON 格式
@@ -239,20 +257,13 @@ JSON 输出格式：
                     logger.error(`🚫 JSON 解析错误: ${parseResult.error}`);
 
                     // 发送错误消息给前端
-                    const errorMsg = {
-                        type: 'error' as const,
-                        content: `❌ LLM 输出格式错误: ${parseResult.error}`,
-                        data: {
-                            error: parseResult.error,
-                            rawResponse: response,
-                            iteration: iteration
-                        },
-                        timestamp: new Date()
-                    };
+                    const errorMsg = MessageFactory.error(
+                        `❌ LLM 输出格式错误: ${parseResult.error}`
+                    );
 
                     // 调试日志
                     logger.info(`[msg][error] ❌ LLM 输出格式错误: ${parseResult.error}`);
-                    logger.debug(`[msg][error] data: ${JSON.stringify(errorMsg.data)}`);
+                    logger.debug(`[msg][error] metadata: ${JSON.stringify(errorMsg.metadata)}`);
 
                     callbacks.onMessage(errorMsg);
                     break; // 结束循环
@@ -267,8 +278,11 @@ JSON 输出格式：
                 logger.info('=== END PARSE RESULT ===');
 
                 if (parseResult.thought) {
-                    // 只记录到日志，不显示给用户
+                    // 发送思考过程给用户
+                    const thinkingMsg = MessageFactory.thinking(parseResult.thought);
+
                     logger.info(`💭 思考: ${parseResult.thought}`);
+                    callbacks.onMessage(thinkingMsg);
                 }
 
                 if (parseResult.action && parseResult.actionInput) {
@@ -277,21 +291,16 @@ JSON 输出格式：
                     logger.info(`Tool Name: ${parseResult.action}`);
                     logger.info(`Tool Input: ${JSON.stringify(parseResult.actionInput, null, 2)}`);
 
-                    // 发送工具开始消息
+                    // 发送工具开始消息 - 使用标准化格式
                     const actionMessage = this.getActionMessage(parseResult.action, parseResult.actionInput);
-                    const toolStartMsg = {
-                        type: 'tool_start' as const,
-                        content: actionMessage,
-                        data: {
-                            toolName: parseResult.action,
-                            toolInput: parseResult.actionInput
-                        },
-                        timestamp: new Date()
-                    };
+                    const toolStartMsg = MessageFactory.toolMessage(
+                        parseResult.action,
+                        actionMessage
+                    );
 
                     // 调试日志
                     logger.info(`[msg][tool_start] ${actionMessage}`);
-                    logger.debug(`[msg][tool_start] data: ${JSON.stringify(toolStartMsg.data)}`);
+                    logger.debug(`[msg][tool_start] metadata: ${JSON.stringify(toolStartMsg.metadata)}`);
 
                     callbacks.onMessage(toolStartMsg);
 
@@ -313,24 +322,18 @@ JSON 输出格式：
 
                     conversation.push({ role: 'user' as const, content: `Observation: ${observation}` });
 
-                    // 发送工具完成消息
+                    // 发送工具完成消息 - 使用标准化格式
                     const completeMessage = this.getCompleteMessage(parseResult.action, toolResult, parseResult.actionInput);
-                    const toolCompleteMsg = {
-                        type: toolResult.success ? 'tool_complete' as const : 'tool_error' as const,
-                        content: completeMessage,
-                        data: {
-                            toolName: parseResult.action,
-                            toolInput: parseResult.actionInput,
-                            toolOutput: toolResult.data,
-                            success: toolResult.success,
-                            error: toolResult.error
-                        },
-                        timestamp: new Date()
-                    };
+                    const toolCompleteMsg = MessageFactory.toolMessage(
+                        parseResult.action,
+                        completeMessage,
+                        toolResult.success,
+                        toolResult.data
+                    );
 
                     // 调试日志
                     logger.info(`[msg][${toolCompleteMsg.type}] ${completeMessage}`);
-                    logger.debug(`[msg][${toolCompleteMsg.type}] data: ${JSON.stringify(toolCompleteMsg.data)}`);
+                    logger.debug(`[msg][${toolCompleteMsg.type}] metadata: ${JSON.stringify(toolCompleteMsg.metadata)}`);
 
                     callbacks.onMessage(toolCompleteMsg);
 
@@ -340,22 +343,14 @@ JSON 输出格式：
 
                 if (parseResult.finalAnswer) {
                     finalAnswer = parseResult.finalAnswer;
-                    // 发送任务完成消息
-                    const taskCompleteMsg = {
-                        type: 'task_complete' as const,
-                        content: '任务完成',
-                        data: {
-                            result: parseResult.finalAnswer,
-                            success: true
-                        },
-                        timestamp: new Date()
-                    };
+                    // 发送普通助手消息给用户
+                    const assistantMsg = MessageFactory.assistantMessage(parseResult.finalAnswer);
 
                     // 调试日志
-                    logger.info(`[msg][task_complete] 任务完成`);
-                    logger.debug(`[msg][task_complete] data: ${JSON.stringify(taskCompleteMsg.data)}`);
+                    logger.info(`[msg][assistant] 发送回答给用户`);
+                    logger.debug(`[msg][assistant] content: ${parseResult.finalAnswer}`);
 
-                    callbacks.onMessage(taskCompleteMsg);
+                    callbacks.onMessage(assistantMsg);
                     break;
                 }
 
@@ -364,19 +359,13 @@ JSON 输出格式：
                 logger.error(`💥 第 ${iteration} 轮执行出现异常: ${errorMessage}`);
                 logger.error(`Stack trace: ${error instanceof Error ? error.stack : 'No stack trace'}`);
 
-                const errorMsg = {
-                    type: 'error' as const,
-                    content: `❌ 第 ${iteration} 轮执行失败: ${errorMessage}`,
-                    data: {
-                        error: errorMessage,
-                        iteration: iteration
-                    },
-                    timestamp: new Date()
-                };
+                const errorMsg = MessageFactory.error(
+                    `❌ 第 ${iteration} 轮执行失败: ${errorMessage}`
+                );
 
                 // 调试日志
                 logger.info(`[msg][error] ❌ 第 ${iteration} 轮执行失败: ${errorMessage}`);
-                logger.debug(`[msg][error] data: ${JSON.stringify(errorMsg.data)}`);
+                logger.debug(`[msg][error] metadata: ${JSON.stringify(errorMsg.metadata)}`);
 
                 callbacks.onMessage(errorMsg);
                 break;
@@ -391,19 +380,11 @@ JSON 输出格式：
 
         if (!finalAnswer && iteration >= this.maxIterations) {
             finalAnswer = '抱歉，在最大迭代次数内未能完成任务。';
-            const maxIterationMsg = {
-                type: 'error' as const,
-                content: '⚠️ 达到最大迭代次数',
-                data: {
-                    maxIterations: this.maxIterations,
-                    actualIterations: iteration
-                },
-                timestamp: new Date()
-            };
+            const maxIterationMsg = MessageFactory.error('⚠️ 达到最大迭代次数');
 
             // 调试日志
             logger.info(`[msg][error] ⚠️ 达到最大迭代次数`);
-            logger.debug(`[msg][error] data: ${JSON.stringify(maxIterationMsg.data)}`);
+            logger.debug(`[msg][error] metadata: ${JSON.stringify(maxIterationMsg.metadata)}`);
 
             callbacks.onMessage(maxIterationMsg);
         }
@@ -451,13 +432,16 @@ JSON 输出格式：
             return `❌ 操作失败: ${toolResult.error}`;
         }
 
+        // 获取路径参数，支持多种参数名
+        const getPath = () => actionInput.path || actionInput.file_path || actionInput.filePath || '';
+
         switch (action) {
             case 'read_file':
-                return `✅ 已读取文件: ${actionInput.path}`;
+                return `✅ 已读取文件: ${getPath()}`;
             case 'write_file':
-                return `✅ 已写入文件: ${actionInput.path}`;
+                return `✅ 已写入文件: ${getPath()}`;
             case 'edit_file':
-                return `✅ 已编辑文件: ${actionInput.path}`;
+                return `✅ 已编辑文件: ${getPath()}`;
             case 'list_files':
                 const fileCount = Array.isArray(toolResult.data?.files) ? toolResult.data.files.length : 0;
                 return `✅ 找到 ${fileCount} 个文件/目录`;
@@ -468,13 +452,13 @@ JSON 输出格式：
                 const matchCount = toolResult.data?.matches?.length || 0;
                 return `✅ 搜索完成，找到 ${matchCount} 个匹配项`;
             case 'get_file_info':
-                return `✅ 已获取文件信息: ${actionInput.path}`;
+                return `✅ 已获取文件信息: ${getPath()}`;
             case 'create_directory':
-                return `✅ 已创建目录: ${actionInput.path}`;
+                return `✅ 已创建目录: ${getPath()}`;
             case 'move_file':
-                return `✅ 已移动文件: ${actionInput.source} → ${actionInput.destination}`;
+                return `✅ 已移动文件: ${actionInput.source || actionInput.from || ''} → ${actionInput.destination || actionInput.to || ''}`;
             case 'delete_file':
-                return `✅ 已删除: ${actionInput.path}`;
+                return `✅ 已删除: ${getPath()}`;
             default:
                 return `✅ 操作完成: ${action}`;
         }

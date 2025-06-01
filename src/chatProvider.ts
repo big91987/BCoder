@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { AgentManager } from './agent/agentManager';
-import { IAgent, AgentRequest, AgentCallbacks, AgentMessage } from './agent/agentInterface';
+import { IAgent, AgentRequest, AgentCallbacks } from './agent/agentInterface';
+import { StandardMessage } from './types/message';
 import { logger } from './utils/logger';
 
 /**
@@ -49,8 +50,8 @@ export class ChatProvider {
             // 收集 Agent 输出
             let responseContent = '';
             const callbacks: AgentCallbacks = {
-                onMessage: (message: AgentMessage) => {
-                    responseContent += this.formatAgentMessage(message);
+                onMessage: (message: StandardMessage) => {
+                    responseContent += this.formatMessage(message);
                     logger.chatDebug(`Agent message: ${message.type}`, { content: message.content.substring(0, 100) }, sessionId);
                 },
                 onComplete: (result: string) => {
@@ -122,7 +123,7 @@ export class ChatProvider {
             // 创建回调处理器 - 直接传递结构化消息
             let responseContent = '';
             const callbacks: AgentCallbacks = {
-                onMessage: (message: AgentMessage) => {
+                onMessage: (message: StandardMessage) => {
                     // 直接传递结构化消息，添加 sessionId
                     onAgentMessage({
                         ...message,
@@ -130,7 +131,7 @@ export class ChatProvider {
                     });
 
                     // 同时格式化用于历史记录
-                    const formattedMessage = this.formatAgentMessage(message);
+                    const formattedMessage = this.formatMessage(message);
                     responseContent += formattedMessage;
                 },
                 onComplete: (result: string) => {
@@ -186,20 +187,29 @@ export class ChatProvider {
     }
 
     /**
-     * 格式化 Agent 消息 - 标准化格式化器
+     * 格式化消息 - 支持新旧两种消息格式
      */
-    private formatAgentMessage(message: AgentMessage): string {
+    private formatMessage(message: StandardMessage): string {
+        // 统一使用 StandardMessage 格式
+        return this.formatStandardMessage(message);
+    }
+
+    /**
+     * 格式化标准化消息
+     */
+    private formatStandardMessage(message: StandardMessage): string {
         switch (message.type) {
             // 工具相关消息
             case 'tool_start':
                 return `🔧 ${message.content}\n`;
-            case 'tool_complete':
+            case 'tool_result':
                 return `✅ ${message.content}\n`;
             case 'tool_error':
                 return `❌ ${message.content}\n`;
             case 'tool_progress':
-                const progress = message.data?.progress || 0;
-                return `⏳ ${message.content} (${progress}%)\n`;
+                const progress = message.metadata?.progress?.current || 0;
+                const total = message.metadata?.progress?.total || 100;
+                return `⏳ ${message.content} (${Math.round(progress/total*100)}%)\n`;
 
             // 思考和规划
             case 'thinking':
@@ -214,30 +224,23 @@ export class ChatProvider {
                 return `\n🎉 ${message.content}\n\n`;
 
             // 系统信息
-            case 'system_info':
+            case 'info':
                 return `ℹ️ ${message.content}\n`;
-            case 'progress':
-                return `📊 ${message.content}\n`;
             case 'error':
                 return `❌ ${message.content}\n`;
+            case 'warning':
+                return `⚠️ ${message.content}\n`;
 
-            // 向后兼容
-            case 'step_start':
-                return `⚡ ${message.content}\n`;
-            case 'step_complete':
-                return `${message.content}\n`;
-            case 'plan':
-                return `📋 ${message.content}\n\n`;
-
-            // 用户和助手消息
-            case 'user_message':
-            case 'assistant_message':
+            // 基础消息
+            case 'text':
                 return `${message.content}\n`;
 
             default:
                 return `${message.content}\n`;
         }
     }
+
+
 
     /**
      * 获取工作区上下文
