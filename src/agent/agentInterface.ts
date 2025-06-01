@@ -30,6 +30,7 @@ export interface AgentRequest {
         [key: string]: any;
     };
     sessionId: string;
+    conversationHistory?: Array<{role: 'system' | 'user' | 'assistant', content: string}>;
 }
 
 export interface AgentResponse {

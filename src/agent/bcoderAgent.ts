@@ -111,7 +111,9 @@ export class BCoderAgent implements IAgent {
      * ReAct Agent Loop - 真正的 Agent 实现
      */
     private async reactAgentLoop(request: AgentRequest, callbacks: AgentCallbacks): Promise<string> {
-        const conversation: Array<{role: 'system' | 'user' | 'assistant', content: string}> = [];
+        // 使用传入的对话历史，如果没有则创建新的
+        const conversation: Array<{role: 'system' | 'user' | 'assistant', content: string}> =
+            request.conversationHistory ? [...request.conversationHistory] : [];
         let iteration = 0;
         let finalAnswer = '';
 
@@ -147,7 +149,7 @@ export class BCoderAgent implements IAgent {
         logger.info(toolDescriptions);
         logger.info('=== END TOOL DEFINITIONS DEBUG ===');
 
-        // 系统提示词
+        // 系统提示词 - 不硬编码用户问题，支持多轮对话
         const systemPrompt = `你是一个智能代码助手。你可以使用以下工具来帮助用户：
 
 ${toolDescriptions}
@@ -183,8 +185,7 @@ JSON 输出格式：
 - 不要自己编造 Observation，等待真实的工具执行结果
 - 收到工具结果后，判断是否需要更多信息还是可以回答
 - 尽量用最少的工具调用完成任务
-
-用户问题: ${request.message}`;
+- 记住之前的对话内容，保持上下文连贯性`;
 
         // 调试系统提示词
         logger.info('=== SYSTEM PROMPT DEBUG ===');

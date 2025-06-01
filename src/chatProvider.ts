@@ -113,11 +113,12 @@ export class ChatProvider {
                 throw new Error('No agent available');
             }
 
-            // 构建请求
+            // 构建请求，包含对话历史
             const request: AgentRequest = {
                 message: question,
                 context: await this.getWorkspaceContext(),
-                sessionId
+                sessionId,
+                conversationHistory: [...this.conversationHistory] // 传递对话历史副本
             };
 
             // 创建回调处理器 - 直接传递结构化消息
