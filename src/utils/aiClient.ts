@@ -36,7 +36,7 @@ export class AIClient {
         this.apiKey = config.get('apiKey', 'e51c57a1-d4de-4572-8387-2a9dc93fff52');
     }
 
-    async chat(prompt: string, history: ChatMessage[] = []): Promise<string> {
+    async chat(prompt: string, history: ChatMessage[] = [], useJsonMode: boolean = false): Promise<string> {
         console.log('AIClient.chat called');
         console.log('apiEndpoint:', this.apiEndpoint);
         console.log('apiKey:', this.apiKey ? 'configured' : 'not configured');
@@ -46,7 +46,7 @@ export class AIClient {
         }
 
         console.log('Using API chat mode');
-        return this.apiChat(prompt, history);
+        return this.apiChat(prompt, history, useJsonMode);
     }
 
     async chatStream(prompt: string, history: ChatMessage[] = [], onChunk: (chunk: string) => void): Promise<string> {
@@ -67,7 +67,7 @@ export class AIClient {
 
 
 
-    private async apiChat(prompt: string, history: ChatMessage[] = []): Promise<string> {
+    private async apiChat(prompt: string, history: ChatMessage[] = [], useJsonMode: boolean = false): Promise<string> {
         try {
             logger.info('=== API Chat Debug Info ===');
             logger.info('apiEndpoint:', this.apiEndpoint);
@@ -85,13 +85,31 @@ export class AIClient {
                 }
             ];
 
-            logger.info('Sending request to:', this.apiEndpoint);
-            const response = await axios.post(this.apiEndpoint, {
+            logger.info('=== API REQUEST DEBUG ===');
+            logger.info('Endpoint:', this.apiEndpoint);
+            logger.info('JSON Mode:', useJsonMode);
+            logger.info('Messages count:', messages.length);
+
+            const requestBody: any = {
                 model: 'doubao-1-5-vision-pro-32k-250115',
                 messages: messages,
                 max_tokens: 1000,
                 temperature: 0.7
-            }, {
+            };
+
+            // 添加 JSON 模式支持
+            if (useJsonMode) {
+                // 先尝试简单的 JSON 模式
+                requestBody.response_format = {
+                    type: "json_object"
+                };
+                logger.info('Added response_format:', requestBody.response_format);
+            }
+
+            logger.info('Request body:', JSON.stringify(requestBody, null, 2));
+            logger.info('=== END API REQUEST DEBUG ===');
+
+            const response = await axios.post(this.apiEndpoint, requestBody, {
                 headers: {
                     'Authorization': `Bearer ${this.apiKey}`,
                     'Content-Type': 'application/json'
@@ -101,7 +119,22 @@ export class AIClient {
 
             return response.data.choices[0].message.content;
         } catch (error) {
+            logger.error('=== API ERROR DEBUG ===');
             logger.error('API chat error:', error);
+            if (axios.isAxiosError(error)) {
+                logger.error('Response status:', error.response?.status);
+                logger.error('Response headers:', error.response?.headers);
+                logger.error('Response data:', JSON.stringify(error.response?.data, null, 2));
+                if (error.config?.data) {
+                    try {
+                        const requestData = JSON.parse(error.config.data);
+                        logger.error('Request data:', JSON.stringify(requestData, null, 2));
+                    } catch (e) {
+                        logger.error('Request data (raw):', error.config.data);
+                    }
+                }
+            }
+            logger.error('=== END API ERROR DEBUG ===');
             throw new Error(`Failed to connect to AI service: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
     }

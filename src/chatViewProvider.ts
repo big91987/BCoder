@@ -45,11 +45,53 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             const messages = this._chatCache.getCurrentMessages();
             logger.info(`🔄 Attempting to restore ${messages.length} messages from cache`);
 
-            // 无论是否有消息都要调用 updateChatUI，确保界面正确初始化
-            this.updateChatUI();
-
             if (messages.length > 0) {
-                logger.info(`✅ Successfully restored ${messages.length} messages from cache`);
+                // 分批恢复消息，避免前端处理冲突
+                let messageIndex = 0;
+                const sendNextMessage = () => {
+                    if (messageIndex >= messages.length || !this._view) {
+                        logger.info(`✅ Successfully restored ${messages.length} messages from cache`);
+                        return;
+                    }
+
+                    const msg = messages[messageIndex];
+                    messageIndex++;
+
+                    // 跳过空的助手消息
+                    if (msg.role === 'assistant' && !msg.messageType && !msg.content.trim()) {
+                        logger.info(`⏭️ Skipping empty assistant message: ${msg.id}`);
+                        setTimeout(sendNextMessage, 10); // 快速跳过
+                        return;
+                    }
+
+                    if (msg.messageType) {
+                        // 结构化消息：直接恢复
+                        logger.info(`🔄 Restoring structured message: ${msg.messageType} - "${msg.content}"`);
+                        this._view.webview.postMessage({
+                            type: 'agentMessage',
+                            messageType: msg.messageType,
+                            content: msg.content,
+                            data: msg.data || {},
+                            timestamp: msg.timestamp
+                        });
+                    } else {
+                        // 普通消息：转换为对应的消息类型
+                        logger.info(`🔄 Restoring regular message: ${msg.role} - "${msg.content}"`);
+                        this._view.webview.postMessage({
+                            type: 'agentMessage',
+                            messageType: msg.role === 'user' ? 'user_message' : 'assistant_message',
+                            content: msg.content,
+                            data: {},
+                            timestamp: msg.timestamp
+                        });
+                    }
+
+                    // 延迟发送下一条消息，避免前端处理冲突
+                    setTimeout(sendNextMessage, 50);
+                };
+
+                // 开始发送消息
+                sendNextMessage();
             } else {
                 logger.info(`📭 No messages to restore, showing empty state`);
             }
@@ -90,7 +132,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         const messagesAfterAdd = this._chatCache.getCurrentMessages();
         logger.info(`📊 Messages count after add: ${messagesAfterAdd.length}`);
 
-        this.updateChatUI();
+        // 发送用户消息到前端
+        if (this._view) {
+            this._view.webview.postMessage({
+                type: 'agentMessage',
+                messageType: 'user_message',
+                content: message,
+                data: {},
+                timestamp: new Date()
+            });
+        }
 
         try {
             // Show typing indicator
@@ -99,31 +150,34 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             // Create assistant message in cache
             const assistantMessage = this._chatCache.addMessage('assistant', '');
 
-            // Get AI response with streaming
-            const response = await this._chatProvider.askQuestionStream(message, (chunk: string) => {
-                // Update the assistant message content in cache
-                const messages = this._chatCache.getCurrentMessages();
-                const lastMessage = messages[messages.length - 1];
-                if (lastMessage && lastMessage.role === 'assistant') {
-                    lastMessage.content += chunk;
-                    this.updateChatUIStreaming();
-                }
+            // Get AI response with structured message handling
+            const response = await this._chatProvider.askQuestionWithStructuredMessages(message, (agentMessage: any) => {
+                // Handle structured agent messages
+                this.handleAgentMessage(agentMessage);
             });
 
-            // Final update with complete response - 直接更新缓存中的消息
+            // 使用结构化消息时，不需要更新缓存和UI，因为消息已经通过 handleAgentMessage 实时发送到前端
+            // 只需要更新历史记录用于下次对话
             const messages = this._chatCache.getCurrentMessages();
             const lastMessage = messages[messages.length - 1];
             if (lastMessage && lastMessage.role === 'assistant') {
                 lastMessage.content = response;
+                // addMessage 方法会自动保存，这里不需要手动保存
             }
-            this.updateChatUI();
 
         } catch (error) {
             logger.error('Error in chat:', error);
 
-            // Add error message to cache
-            this._chatCache.addMessage('assistant', `Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
-            this.updateChatUI();
+            // Send error message directly to frontend
+            if (this._view) {
+                this._view.webview.postMessage({
+                    type: 'agentMessage',
+                    messageType: 'error',
+                    content: `Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+                    data: { error: error instanceof Error ? error.message : 'Unknown error' },
+                    timestamp: new Date()
+                });
+            }
         }
     }
 
@@ -135,29 +189,39 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
     }
 
-    private updateChatUI() {
-        if (this._view) {
-            const messages = this._chatCache.getCurrentMessages();
-            this._view.webview.postMessage({
-                type: 'updateChat',
-                history: messages
-            });
-        }
-    }
-
-    private updateChatUIStreaming() {
-        if (this._view) {
-            const messages = this._chatCache.getCurrentMessages();
-            this._view.webview.postMessage({
-                type: 'updateChatStreaming',
-                history: messages
-            });
-        }
-    }
-
     private clearChat() {
         this._chatCache.clearCurrentSession();
-        this.updateChatUI();
+
+        // Clear frontend directly
+        if (this._view) {
+            this._view.webview.postMessage({
+                type: 'agentMessage',
+                messageType: 'clear',
+                content: '',
+                data: {},
+                timestamp: new Date()
+            });
+        }
+    }
+
+    private handleAgentMessage(agentMessage: any) {
+        logger.debug(`[CHAT] [${agentMessage.sessionId || 'unknown'}] Agent message: ${agentMessage.type}`, {
+            content: agentMessage.content
+        });
+
+        // 将结构化消息保存到缓存
+        this._chatCache.addStructuredMessage(agentMessage.type, agentMessage.content, agentMessage.data);
+
+        // 发送结构化消息到前端
+        if (this._view) {
+            this._view.webview.postMessage({
+                type: 'agentMessage',
+                messageType: agentMessage.type,
+                content: agentMessage.content,
+                data: agentMessage.data,
+                timestamp: agentMessage.timestamp
+            });
+        }
     }
 
 
@@ -246,6 +310,118 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     background-color: var(--vscode-inputValidation-errorBackground);
                     color: var(--vscode-inputValidation-errorForeground);
                     border: 1px solid var(--vscode-inputValidation-errorBorder);
+                }
+
+                /* 工具执行框 */
+                .tool-execution {
+                    align-self: flex-start;
+                    background-color: #f8f9fa;
+                    border: 2px solid #007ACC;
+                    border-radius: 8px;
+                    margin: 8px 0;
+                    max-width: 95%;
+                    width: auto;
+                    min-width: 300px;
+                    overflow: visible;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                }
+
+                .tool-header {
+                    background-color: #007ACC;
+                    color: white;
+                    padding: 10px 12px;
+                    font-size: 13px;
+                    font-weight: bold;
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                }
+
+                .tool-content {
+                    padding: 10px 12px;
+                    font-size: 13px;
+                    line-height: 1.4;
+                    color: #333;
+                    background-color: white;
+                    word-wrap: break-word;
+                    overflow-wrap: break-word;
+                    white-space: pre-wrap;
+                }
+
+                .tool-status {
+                    padding: 8px 12px;
+                    font-size: 12px;
+                    border-top: 1px solid #dee2e6;
+                    font-weight: bold;
+                }
+
+                .tool-status.success {
+                    background-color: #28a745;
+                    color: white;
+                }
+
+                .tool-status.error {
+                    background-color: #dc3545;
+                    color: white;
+                }
+
+                /* 思考过程框 */
+                .thinking-box {
+                    align-self: flex-start;
+                    background-color: var(--vscode-editor-inactiveSelectionBackground);
+                    border: 1px solid var(--vscode-panel-border);
+                    border-radius: 6px;
+                    margin: 3px 0;
+                    max-width: 80%;
+                    font-size: 12px;
+                    opacity: 0.8;
+                }
+
+                .thinking-header {
+                    padding: 6px 10px;
+                    background-color: var(--vscode-badge-background);
+                    color: var(--vscode-badge-foreground);
+                    font-weight: bold;
+                    cursor: pointer;
+                    display: flex;
+                    align-items: center;
+                    gap: 6px;
+                }
+
+                .thinking-content {
+                    padding: 8px 10px;
+                    font-style: italic;
+                    display: none;
+                }
+
+                .thinking-content.expanded {
+                    display: block;
+                }
+
+                /* 进度框 */
+                .progress-box {
+                    align-self: flex-start;
+                    background-color: var(--vscode-progressBar-background);
+                    border-radius: 4px;
+                    margin: 3px 0;
+                    max-width: 70%;
+                    padding: 6px 10px;
+                    font-size: 12px;
+                    color: var(--vscode-foreground);
+                }
+
+                /* 系统消息框 */
+                .system-message {
+                    align-self: center;
+                    background-color: var(--vscode-notifications-background);
+                    border: 1px solid var(--vscode-notifications-border);
+                    border-radius: 6px;
+                    padding: 8px 12px;
+                    margin: 5px 0;
+                    font-size: 12px;
+                    text-align: center;
+                    max-width: 60%;
+                    opacity: 0.9;
                 }
 
                 .timestamp {
@@ -341,6 +517,55 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     font-size: 12px;
                     line-height: 1.4;
                 }
+
+
+
+                /* 思考过程框 */
+                .thinking-box {
+                    align-self: flex-start;
+                    background-color: var(--vscode-editor-inactiveSelectionBackground);
+                    border: 1px solid var(--vscode-panel-border);
+                    border-radius: 6px;
+                    margin: 3px 0;
+                    max-width: 80%;
+                    font-size: 12px;
+                    opacity: 0.8;
+                }
+
+                .thinking-header {
+                    padding: 6px 10px;
+                    background-color: var(--vscode-badge-background);
+                    color: var(--vscode-badge-foreground);
+                    font-weight: bold;
+                    cursor: pointer;
+                    display: flex;
+                    align-items: center;
+                    gap: 6px;
+                }
+
+                .thinking-content {
+                    padding: 8px 10px;
+                    font-style: italic;
+                    display: none;
+                }
+
+                .thinking-content.expanded {
+                    display: block;
+                }
+
+                /* 系统消息框 */
+                .system-message {
+                    align-self: center;
+                    background-color: var(--vscode-notifications-background);
+                    border: 1px solid var(--vscode-notifications-border);
+                    border-radius: 6px;
+                    padding: 8px 12px;
+                    margin: 5px 0;
+                    font-size: 12px;
+                    text-align: center;
+                    max-width: 60%;
+                    opacity: 0.9;
+                }
             </style>
         </head>
         <body>
@@ -427,6 +652,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 }
 
                 function renderMessage(msg) {
+                    // 根据消息类型渲染不同的组件
+                    if (msg.messageType) {
+                        return renderAgentMessage(msg);
+                    } else {
+                        return renderChatMessage(msg);
+                    }
+                }
+
+                function renderChatMessage(msg) {
                     const messageDiv = document.createElement('div');
                     messageDiv.className = \`message \${msg.role}\`;
 
@@ -442,16 +676,153 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     return messageDiv;
                 }
 
+                function renderAgentMessage(msg) {
+                    const messageType = msg.messageType;
+
+                    switch (messageType) {
+                        case 'tool_start':
+                        case 'tool_complete':
+                        case 'tool_error':
+                        case 'tool_progress':
+                            return renderToolMessage(msg);
+
+                        case 'thinking':
+                        case 'planning':
+                            return renderThinkingMessage(msg);
+
+                        case 'system_info':
+                        case 'progress':
+                            return renderSystemMessage(msg);
+
+                        case 'error':
+                            return renderErrorMessage(msg);
+
+                        case 'task_start':
+                        case 'task_complete':
+                            return renderTaskMessage(msg);
+
+                        case 'user_message':
+                        case 'assistant_message':
+                            return renderChatMessage({
+                                role: msg.messageType === 'user_message' ? 'user' : 'assistant',
+                                content: msg.content,
+                                timestamp: msg.timestamp
+                            });
+
+                        default:
+                            return renderChatMessage(msg);
+                    }
+                }
+
+                function renderToolMessage(msg) {
+                    const toolDiv = document.createElement('div');
+                    toolDiv.className = 'tool-execution';
+
+                    // 工具头部
+                    const header = document.createElement('div');
+                    header.className = 'tool-header';
+
+                    const icon = getToolIcon(msg.messageType);
+                    const toolName = msg.data?.toolName || 'Unknown Tool';
+                    header.innerHTML = \`\${icon} \${toolName}\`;
+                    toolDiv.appendChild(header);
+
+                    // 工具内容
+                    const content = document.createElement('div');
+                    content.className = 'tool-content';
+                    content.textContent = msg.content;
+                    toolDiv.appendChild(content);
+
+                    // 工具状态
+                    if (msg.messageType === 'tool_complete' || msg.messageType === 'tool_error') {
+                        const status = document.createElement('div');
+                        status.className = \`tool-status \${msg.data?.success ? 'success' : 'error'}\`;
+                        status.textContent = msg.data?.success ? '执行成功' : '执行失败';
+                        toolDiv.appendChild(status);
+                    }
+
+                    return toolDiv;
+                }
+
+                function renderThinkingMessage(msg) {
+                    const thinkingDiv = document.createElement('div');
+                    thinkingDiv.className = 'thinking-box';
+
+                    const header = document.createElement('div');
+                    header.className = 'thinking-header';
+                    header.innerHTML = \`💭 \${msg.messageType === 'planning' ? '规划' : '思考'} <span style="font-size: 10px;">▼</span>\`;
+                    header.onclick = () => toggleThinking(thinkingDiv);
+                    thinkingDiv.appendChild(header);
+
+                    const content = document.createElement('div');
+                    content.className = 'thinking-content';
+                    content.textContent = msg.content;
+                    thinkingDiv.appendChild(content);
+
+                    return thinkingDiv;
+                }
+
+                function renderSystemMessage(msg) {
+                    const systemDiv = document.createElement('div');
+                    systemDiv.className = 'system-message';
+                    systemDiv.textContent = msg.content;
+                    return systemDiv;
+                }
+
+                function renderErrorMessage(msg) {
+                    const errorDiv = document.createElement('div');
+                    errorDiv.className = 'message error';
+                    errorDiv.textContent = msg.content;
+                    return errorDiv;
+                }
+
+                function renderTaskMessage(msg) {
+                    // 对于 task_complete，渲染为普通的助手消息
+                    if (msg.messageType === 'task_complete' && msg.data?.result) {
+                        return renderChatMessage({
+                            role: 'assistant',
+                            content: msg.data.result,
+                            timestamp: msg.timestamp
+                        });
+                    } else {
+                        // 其他任务消息（如 task_start）使用系统消息样式
+                        const taskDiv = document.createElement('div');
+                        taskDiv.className = 'system-message';
+                        taskDiv.innerHTML = \`<strong>\${msg.content}</strong>\`;
+                        return taskDiv;
+                    }
+                }
+
+                function getToolIcon(messageType) {
+                    switch (messageType) {
+                        case 'tool_start': return '⚡';
+                        case 'tool_complete': return '✅';
+                        case 'tool_error': return '❌';
+                        case 'tool_progress': return '⏳';
+                        default: return '🔧';
+                    }
+                }
+
+                function toggleThinking(thinkingDiv) {
+                    const content = thinkingDiv.querySelector('.thinking-content');
+                    const header = thinkingDiv.querySelector('.thinking-header');
+
+                    if (content.classList.contains('expanded')) {
+                        content.classList.remove('expanded');
+                        header.innerHTML = header.innerHTML.replace('▲', '▼');
+                    } else {
+                        content.classList.add('expanded');
+                        header.innerHTML = header.innerHTML.replace('▼', '▲');
+                    }
+                }
+
                 // Handle messages from extension
                 window.addEventListener('message', event => {
                     const message = event.data;
 
                     switch (message.type) {
-                        case 'updateChat':
-                            updateChatHistory(message.history);
-                            break;
-                        case 'updateChatStreaming':
-                            updateChatHistoryStreaming(message.history);
+                        case 'agentMessage':
+                            handleAgentMessage(message);
                             break;
                         case 'showTyping':
                             showTypingIndicator();
@@ -459,64 +830,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     }
                 });
 
-                function updateChatHistory(history) {
-                    const container = document.getElementById('chatContainer');
-                    container.innerHTML = '';
 
-                    if (history.length === 0) {
-                        container.innerHTML = \`
-                            <div class="empty-state">
-                                <h3>👋 Hello!</h3>
-                                <p>Ask me anything about your code.<br>I'm here to help!</p>
-                            </div>
-                        \`;
-                    } else {
-                        history.forEach(msg => {
-                            container.appendChild(renderMessage(msg));
-                        });
-                    }
-
-                    // Remove typing indicator
-                    const typingIndicator = container.querySelector('.typing-indicator');
-                    if (typingIndicator) {
-                        typingIndicator.remove();
-                    }
-
-                    // Scroll to bottom
-                    container.scrollTop = container.scrollHeight;
-
-                    isTyping = false;
-                    updateSendButton();
-                }
-
-                function updateChatHistoryStreaming(history) {
-                    const container = document.getElementById('chatContainer');
-
-                    // Remove typing indicator if present
-                    const typingIndicator = container.querySelector('.typing-indicator');
-                    if (typingIndicator) {
-                        typingIndicator.remove();
-                    }
-
-                    // Clear and rebuild all messages
-                    container.innerHTML = '';
-
-                    if (history.length === 0) {
-                        container.innerHTML = \`
-                            <div class="empty-state">
-                                <h3>👋 Hello!</h3>
-                                <p>Ask me anything about your code.<br>I'm here to help!</p>
-                            </div>
-                        \`;
-                    } else {
-                        history.forEach(msg => {
-                            container.appendChild(renderMessage(msg));
-                        });
-                    }
-
-                    // Scroll to bottom
-                    container.scrollTop = container.scrollHeight;
-                }
 
                 function showTypingIndicator() {
                     const container = document.getElementById('chatContainer');
@@ -532,6 +846,62 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     typingDiv.className = 'typing-indicator';
                     typingDiv.textContent = 'BCoder is thinking...';
                     container.appendChild(typingDiv);
+
+                    // Scroll to bottom
+                    container.scrollTop = container.scrollHeight;
+                }
+
+                function handleAgentMessage(message) {
+                    console.log('🔍 [Frontend] Received message:', message.messageType, message.content);
+
+                    const container = document.getElementById('chatContainer');
+
+                    // Handle clear message
+                    if (message.messageType === 'clear') {
+                        container.innerHTML = \`
+                            <div class="empty-state">
+                                <h3>👋 Hello!</h3>
+                                <p>Ask me anything about your code.<br>I'm here to help!</p>
+                            </div>
+                        \`;
+                        isTyping = false;
+                        updateSendButton();
+                        return;
+                    }
+
+                    // Remove typing indicator if present
+                    const typingIndicator = container.querySelector('.typing-indicator');
+                    if (typingIndicator) {
+                        typingIndicator.remove();
+                    }
+
+                    // Remove empty state if present
+                    const emptyState = container.querySelector('.empty-state');
+                    if (emptyState) {
+                        emptyState.remove();
+                    }
+
+                    // Create message object for rendering
+                    const msgObj = {
+                        messageType: message.messageType,
+                        content: message.content,
+                        data: message.data,
+                        timestamp: message.timestamp
+                    };
+
+                    console.log('🎨 [Frontend] Rendering message:', msgObj.messageType);
+
+                    // Render and append the message
+                    const messageElement = renderMessage(msgObj);
+                    console.log('📦 [Frontend] Created element:', messageElement.className, messageElement.innerHTML.substring(0, 100));
+
+                    container.appendChild(messageElement);
+
+                    // 如果是任务完成，停止 typing 状态
+                    if (message.messageType === 'task_complete') {
+                        isTyping = false;
+                        updateSendButton();
+                    }
 
                     // Scroll to bottom
                     container.scrollTop = container.scrollHeight;

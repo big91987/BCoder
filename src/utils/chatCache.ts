@@ -9,6 +9,9 @@ export interface ChatMessage {
     content: string;
     timestamp: Date;
     sessionId?: string;
+    // 新增：支持结构化消息
+    messageType?: string;
+    data?: any;
 }
 
 export interface ChatSession {
@@ -138,6 +141,42 @@ export class ChatCache {
         logger.chatDebug('Message added to cache', {
             messageId: message.id,
             role,
+            contentLength: content.length
+        });
+
+        return message;
+    }
+
+    /**
+     * 添加结构化消息到当前会话
+     */
+    public addStructuredMessage(messageType: string, content: string, data?: any): ChatMessage {
+        if (!this.currentSession) {
+            this.createNewSession();
+        }
+
+        const message: ChatMessage = {
+            id: `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+            role: 'assistant', // 结构化消息通常是助手消息
+            content,
+            timestamp: new Date(),
+            sessionId: this.currentSession!.id,
+            messageType,
+            data
+        };
+
+        this.currentSession!.messages.push(message);
+        this.currentSession!.updatedAt = new Date();
+
+        // 限制消息数量
+        if (this.currentSession!.messages.length > this.maxMessagesPerSession) {
+            this.currentSession!.messages = this.currentSession!.messages.slice(-this.maxMessagesPerSession);
+        }
+
+        this.saveSession(this.currentSession!);
+        logger.chatDebug('Structured message added to cache', {
+            messageId: message.id,
+            messageType,
             contentLength: content.length
         });
 

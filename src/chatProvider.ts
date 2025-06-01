@@ -85,17 +85,25 @@ export class ChatProvider {
         }
     }
 
+
+
     /**
-     * 处理用户问题 - 流式
+     * 结构化消息问答 - 直接传递 Agent 消息
      */
-    async askQuestionStream(question: string, onChunk: (chunk: string) => void): Promise<string> {
+    async askQuestionWithStructuredMessages(question: string, onAgentMessage: (message: any) => void): Promise<string> {
         const sessionId = `chat_stream_${Date.now()}`;
         logger.startTimer(sessionId);
+        logger.info('[UserInput] User input received', {
+            message: question,
+            context: {
+                sessionId,
+                streaming: true,
+                structured: true
+            }
+        });
 
         try {
-            logger.chatUserInput(question, { sessionId, streaming: true });
-
-            // 添加到历史记录
+            // 添加用户消息到历史记录
             this.conversationHistory.push({ role: 'user', content: question });
 
             // 获取当前 Agent
@@ -111,14 +119,19 @@ export class ChatProvider {
                 sessionId
             };
 
-            // 流式回调 - 直接转发 Agent 的输出
+            // 创建回调处理器 - 直接传递结构化消息
             let responseContent = '';
             const callbacks: AgentCallbacks = {
                 onMessage: (message: AgentMessage) => {
+                    // 直接传递结构化消息，添加 sessionId
+                    onAgentMessage({
+                        ...message,
+                        sessionId
+                    });
+
+                    // 同时格式化用于历史记录
                     const formattedMessage = this.formatAgentMessage(message);
                     responseContent += formattedMessage;
-                    onChunk(formattedMessage); // 实时发送给前端
-                    logger.chatDebug(`Agent message: ${message.type}`, { content: message.content.substring(0, 100) }, sessionId);
                 },
                 onComplete: (result: string) => {
                     logger.chatDebug('Agent completed', { resultLength: result.length }, sessionId);
@@ -126,8 +139,15 @@ export class ChatProvider {
                 onError: (error: string) => {
                     const errorMsg = `❌ 错误: ${error}\n`;
                     responseContent += errorMsg;
-                    onChunk(errorMsg);
-                    logger.error('Agent error:', error, { sessionId });
+
+                    // 发送错误消息
+                    onAgentMessage({
+                        type: 'error',
+                        content: errorMsg,
+                        data: { error },
+                        timestamp: new Date(),
+                        sessionId
+                    });
                 }
             };
 
@@ -147,38 +167,73 @@ export class ChatProvider {
             return finalResponse;
 
         } catch (error) {
-            logger.error('Error in ChatProvider.askQuestionStream:', error, { sessionId });
+            logger.error('Error in ChatProvider.askQuestionWithStructuredMessages:', error, { sessionId });
             logger.endTimer(sessionId, 'ChatStreamError');
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
             const errorResponse = `Error: ${errorMessage}`;
-            onChunk(errorResponse);
+
+            // 发送错误消息
+            onAgentMessage({
+                type: 'error',
+                content: errorResponse,
+                data: { error: errorMessage },
+                timestamp: new Date(),
+                sessionId
+            });
+
             return errorResponse;
         }
     }
 
     /**
-     * 格式化 Agent 消息 - 可配置的格式化器
+     * 格式化 Agent 消息 - 标准化格式化器
      */
     private formatAgentMessage(message: AgentMessage): string {
-        // 这里可以根据配置使用不同的格式化器
-        // 目前使用简单的默认格式
         switch (message.type) {
+            // 工具相关消息
+            case 'tool_start':
+                return `🔧 ${message.content}\n`;
+            case 'tool_complete':
+                return `✅ ${message.content}\n`;
+            case 'tool_error':
+                return `❌ ${message.content}\n`;
+            case 'tool_progress':
+                const progress = message.data?.progress || 0;
+                return `⏳ ${message.content} (${progress}%)\n`;
+
+            // 思考和规划
+            case 'thinking':
+                return `💭 思考: ${message.content}\n`;
+            case 'planning':
+                return `📋 规划: ${message.content}\n\n`;
+
+            // 任务流程
             case 'task_start':
                 return `🚀 ${message.content}\n\n`;
-            case 'plan':
-                return `📋 ${message.content}\n\n`;
+            case 'task_complete':
+                return `\n🎉 ${message.content}\n\n`;
+
+            // 系统信息
+            case 'system_info':
+                return `ℹ️ ${message.content}\n`;
+            case 'progress':
+                return `📊 ${message.content}\n`;
+            case 'error':
+                return `❌ ${message.content}\n`;
+
+            // 向后兼容
             case 'step_start':
                 return `⚡ ${message.content}\n`;
             case 'step_complete':
                 return `${message.content}\n`;
-            case 'progress':
+            case 'plan':
+                return `📋 ${message.content}\n\n`;
+
+            // 用户和助手消息
+            case 'user_message':
+            case 'assistant_message':
                 return `${message.content}\n`;
-            case 'task_complete':
-                return `\n🎉 ${message.content}\n\n`;
-            case 'error':
-                return `❌ ${message.content}\n`;
-            case 'thinking':
-                return `💭 ${message.content}\n`;
+
             default:
                 return `${message.content}\n`;
         }

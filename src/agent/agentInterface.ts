@@ -3,10 +3,50 @@
  * 所有 Agent 都必须实现这个接口
  */
 
+export type AgentMessageType =
+    | 'user_message'           // 用户输入消息
+    | 'assistant_message'      // 助手回复消息
+    | 'tool_start'            // 工具开始执行
+    | 'tool_progress'         // 工具执行进度
+    | 'tool_complete'         // 工具执行完成
+    | 'tool_error'            // 工具执行错误
+    | 'thinking'              // Agent 思考过程
+    | 'planning'              // Agent 规划过程
+    | 'system_info'           // 系统信息
+    | 'error'                 // 错误信息
+    | 'progress'              // 整体进度
+    | 'task_start'            // 任务开始
+    | 'task_complete'         // 任务完成
+    | 'step_start'            // 步骤开始 (向后兼容)
+    | 'step_complete'         // 步骤完成 (向后兼容)
+    | 'plan';                 // 计划 (向后兼容)
+
 export interface AgentMessage {
-    type: 'task_start' | 'plan' | 'step_start' | 'step_complete' | 'progress' | 'task_complete' | 'error' | 'thinking';
+    type: AgentMessageType;
     content: string;
-    data?: any;
+    data?: {
+        // 工具相关
+        toolName?: string;
+        toolInput?: any;
+        toolOutput?: any;
+
+        // 进度相关
+        progress?: number;
+        totalSteps?: number;
+        currentStep?: number;
+
+        // 状态相关
+        success?: boolean;
+        error?: string;
+
+        // 元数据
+        timestamp?: string;
+        duration?: number;
+        metadata?: any;
+
+        // 向后兼容
+        [key: string]: any;
+    };
     timestamp: Date;
 }
 

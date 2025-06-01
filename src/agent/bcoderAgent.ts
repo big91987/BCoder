@@ -139,20 +139,32 @@ export class BCoderAgent implements IAgent {
 
 ${toolDescriptions}
 
-请使用 ReAct 模式回答用户问题：
-1. Thought: 分析问题，思考需要做什么
-2. Action: 选择要使用的工具和参数
-3. Observation: 观察工具执行结果
-4. 重复上述步骤直到能够回答用户问题
-5. Final Answer: 给出最终答案
+请使用 ReAct 模式回答用户问题，并以 JSON 格式输出。
 
-格式示例：
-Thought: 我需要读取文件来了解内容
-Action: read_file
-Action Input: {"path": "package.json"}
-Observation: [工具执行结果]
-Thought: 现在我了解了文件内容，可以回答用户问题
-Final Answer: 这个文件是...
+工作流程：
+1. 分析用户问题，思考需要什么信息
+2. 如果需要更多信息，使用工具获取
+3. 如果已有足够信息，直接给出最终答案
+
+JSON 输出格式：
+- 如果需要使用工具：
+{
+  "thought": "分析问题，说明为什么需要这个工具",
+  "action": "工具名称",
+  "action_input": {"参数名": "参数值"}
+}
+
+- 如果可以直接回答：
+{
+  "thought": "基于已有信息的分析",
+  "final_answer": "完整的最终答案"
+}
+
+重要：
+- 必须输出有效的 JSON 格式
+- 不要自己编造 Observation，等待真实的工具执行结果
+- 收到工具结果后，判断是否需要更多信息还是可以回答
+- 尽量用最少的工具调用完成任务
 
 用户问题: ${request.message}`;
 
@@ -209,7 +221,7 @@ Final Answer: 这个文件是...
                 logger.info(JSON.stringify(historyMessages, null, 2));
                 logger.info('=== END AICLIENT CALL PARAMS ===');
 
-                const response = await this.aiClient!.chat(currentMessage, historyMessages);
+                const response = await this.aiClient!.chat(currentMessage, historyMessages, true);
 
                 // 打印 LLM 原始输出
                 logger.info('=== RAW LLM OUTPUT ===');
@@ -219,8 +231,32 @@ Final Answer: 这个文件是...
 
                 conversation.push({ role: 'assistant' as const, content: response });
 
-                // 解析 LLM 响应
-                const parseResult = this.parseAgentResponse(response);
+                // 解析 LLM 响应 - 支持 JSON 格式
+                const parseResult = this.parseAgentResponseJson(response);
+
+                // 检查是否有解析错误
+                if (parseResult.error) {
+                    logger.error(`🚫 JSON 解析错误: ${parseResult.error}`);
+
+                    // 发送错误消息给前端
+                    const errorMsg = {
+                        type: 'error' as const,
+                        content: `❌ LLM 输出格式错误: ${parseResult.error}`,
+                        data: {
+                            error: parseResult.error,
+                            rawResponse: response,
+                            iteration: iteration
+                        },
+                        timestamp: new Date()
+                    };
+
+                    // 调试日志
+                    logger.info(`[msg][error] ❌ LLM 输出格式错误: ${parseResult.error}`);
+                    logger.debug(`[msg][error] data: ${JSON.stringify(errorMsg.data)}`);
+
+                    callbacks.onMessage(errorMsg);
+                    break; // 结束循环
+                }
 
                 // 打印解析结果
                 logger.info('=== PARSE RESULT ===');
@@ -241,14 +277,23 @@ Final Answer: 这个文件是...
                     logger.info(`Tool Name: ${parseResult.action}`);
                     logger.info(`Tool Input: ${JSON.stringify(parseResult.actionInput, null, 2)}`);
 
-                    // 显示有意义的用户消息
+                    // 发送工具开始消息
                     const actionMessage = this.getActionMessage(parseResult.action, parseResult.actionInput);
-                    callbacks.onMessage({
-                        type: 'step_start',
+                    const toolStartMsg = {
+                        type: 'tool_start' as const,
                         content: actionMessage,
-                        data: { action: parseResult.action, input: parseResult.actionInput },
+                        data: {
+                            toolName: parseResult.action,
+                            toolInput: parseResult.actionInput
+                        },
                         timestamp: new Date()
-                    });
+                    };
+
+                    // 调试日志
+                    logger.info(`[msg][tool_start] ${actionMessage}`);
+                    logger.debug(`[msg][tool_start] data: ${JSON.stringify(toolStartMsg.data)}`);
+
+                    callbacks.onMessage(toolStartMsg);
 
                     const toolResult = await this.toolSystem!.executeTool(
                         parseResult.action,
@@ -268,43 +313,104 @@ Final Answer: 这个文件是...
 
                     conversation.push({ role: 'user' as const, content: `Observation: ${observation}` });
 
-                    // 显示有意义的完成消息
+                    // 发送工具完成消息
                     const completeMessage = this.getCompleteMessage(parseResult.action, toolResult, parseResult.actionInput);
-                    callbacks.onMessage({
-                        type: 'step_complete',
+                    const toolCompleteMsg = {
+                        type: toolResult.success ? 'tool_complete' as const : 'tool_error' as const,
                         content: completeMessage,
-                        data: { success: toolResult.success, result: toolResult.data },
+                        data: {
+                            toolName: parseResult.action,
+                            toolInput: parseResult.actionInput,
+                            toolOutput: toolResult.data,
+                            success: toolResult.success,
+                            error: toolResult.error
+                        },
                         timestamp: new Date()
-                    });
+                    };
+
+                    // 调试日志
+                    logger.info(`[msg][${toolCompleteMsg.type}] ${completeMessage}`);
+                    logger.debug(`[msg][${toolCompleteMsg.type}] data: ${JSON.stringify(toolCompleteMsg.data)}`);
+
+                    callbacks.onMessage(toolCompleteMsg);
+
+                    // 调试：工具执行后继续循环
+                    logger.info(`🔄 工具执行完成，继续下一轮循环 (iteration ${iteration})`);
                 }
 
                 if (parseResult.finalAnswer) {
                     finalAnswer = parseResult.finalAnswer;
-                    // 不显示"任务完成"，直接显示最终答案
+                    // 发送任务完成消息
+                    const taskCompleteMsg = {
+                        type: 'task_complete' as const,
+                        content: '任务完成',
+                        data: {
+                            result: parseResult.finalAnswer,
+                            success: true
+                        },
+                        timestamp: new Date()
+                    };
+
+                    // 调试日志
+                    logger.info(`[msg][task_complete] 任务完成`);
+                    logger.debug(`[msg][task_complete] data: ${JSON.stringify(taskCompleteMsg.data)}`);
+
+                    callbacks.onMessage(taskCompleteMsg);
                     break;
                 }
 
             } catch (error) {
                 const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-                callbacks.onMessage({
-                    type: 'error',
+                logger.error(`💥 第 ${iteration} 轮执行出现异常: ${errorMessage}`);
+                logger.error(`Stack trace: ${error instanceof Error ? error.stack : 'No stack trace'}`);
+
+                const errorMsg = {
+                    type: 'error' as const,
                     content: `❌ 第 ${iteration} 轮执行失败: ${errorMessage}`,
+                    data: {
+                        error: errorMessage,
+                        iteration: iteration
+                    },
                     timestamp: new Date()
-                });
+                };
+
+                // 调试日志
+                logger.info(`[msg][error] ❌ 第 ${iteration} 轮执行失败: ${errorMessage}`);
+                logger.debug(`[msg][error] data: ${JSON.stringify(errorMsg.data)}`);
+
+                callbacks.onMessage(errorMsg);
                 break;
             }
+
+            // 调试：循环结束检查
+            logger.info(`🔚 第 ${iteration} 轮循环结束，继续下一轮...`);
         }
+
+        // 调试：循环完全结束
+        logger.info(`🏁 ReAct 循环完全结束，总共执行了 ${iteration} 轮，finalAnswer: ${!!finalAnswer}`);
 
         if (!finalAnswer && iteration >= this.maxIterations) {
             finalAnswer = '抱歉，在最大迭代次数内未能完成任务。';
-            callbacks.onMessage({
-                type: 'error',
+            const maxIterationMsg = {
+                type: 'error' as const,
                 content: '⚠️ 达到最大迭代次数',
+                data: {
+                    maxIterations: this.maxIterations,
+                    actualIterations: iteration
+                },
                 timestamp: new Date()
-            });
+            };
+
+            // 调试日志
+            logger.info(`[msg][error] ⚠️ 达到最大迭代次数`);
+            logger.debug(`[msg][error] data: ${JSON.stringify(maxIterationMsg.data)}`);
+
+            callbacks.onMessage(maxIterationMsg);
         }
 
-        return finalAnswer || '任务执行完成，但未获得明确答案。';
+        const result = finalAnswer || '任务执行完成，但未获得明确答案。';
+        logger.info(`📤 Agent 最终返回结果: ${result.substring(0, 100)}${result.length > 100 ? '...' : ''}`);
+        return result;
     }
 
     /**
@@ -375,7 +481,114 @@ Final Answer: 这个文件是...
     }
 
     /**
-     * 解析 Agent 响应
+     * 解析 Agent JSON 响应
+     */
+    private parseAgentResponseJson(response: string): {
+        thought?: string;
+        action?: string;
+        actionInput?: any;
+        finalAnswer?: string;
+        error?: string;
+    } {
+        try {
+            // 尝试解析 JSON 响应
+            const jsonResponse = JSON.parse(response);
+
+            logger.info('=== JSON PARSE SUCCESS ===');
+            logger.info('Parsed JSON:', JSON.stringify(jsonResponse, null, 2));
+
+            // 严格的 JSON 格式校验
+            const validationResult = this.validateJsonResponse(jsonResponse);
+            if (!validationResult.valid) {
+                logger.error('=== JSON VALIDATION FAILED ===');
+                logger.error('Validation errors:', validationResult.errors);
+
+                // 返回错误信息而不是抛出异常
+                return {
+                    error: `JSON 格式校验失败: ${validationResult.errors.join(', ')}`
+                };
+            }
+
+            logger.info('=== JSON VALIDATION SUCCESS ===');
+
+            const result: any = {};
+
+            if (jsonResponse.thought) {
+                result.thought = jsonResponse.thought;
+            }
+
+            if (jsonResponse.action) {
+                result.action = jsonResponse.action;
+                result.actionInput = jsonResponse.action_input || {};
+            }
+
+            if (jsonResponse.final_answer) {
+                result.finalAnswer = jsonResponse.final_answer;
+            }
+
+            logger.info('=== JSON PARSE RESULT ===');
+            logger.info('Final result:', JSON.stringify(result, null, 2));
+
+            return result;
+
+        } catch (error) {
+            logger.error('JSON parsing failed:', error);
+
+            // 返回错误信息而不是抛出异常
+            return {
+                error: `LLM 输出格式错误: ${error instanceof Error ? error.message : 'JSON 解析失败'}`
+            };
+        }
+    }
+
+    /**
+     * 验证 JSON 响应格式
+     */
+    private validateJsonResponse(jsonResponse: any): { valid: boolean; errors: string[] } {
+        const errors: string[] = [];
+
+        // 检查是否是对象
+        if (typeof jsonResponse !== 'object' || jsonResponse === null || Array.isArray(jsonResponse)) {
+            errors.push('响应必须是一个对象');
+            return { valid: false, errors };
+        }
+
+        // 必须包含 thought 字段
+        if (!jsonResponse.thought || typeof jsonResponse.thought !== 'string') {
+            errors.push('缺少必需的 thought 字段或类型不正确');
+        }
+
+        // 检查是否有 action 或 final_answer
+        const hasAction = jsonResponse.action && typeof jsonResponse.action === 'string';
+        const hasFinalAnswer = jsonResponse.final_answer && typeof jsonResponse.final_answer === 'string';
+
+        if (!hasAction && !hasFinalAnswer) {
+            errors.push('必须包含 action 或 final_answer 字段之一');
+        }
+
+        if (hasAction && hasFinalAnswer) {
+            errors.push('不能同时包含 action 和 final_answer 字段');
+        }
+
+        // 如果有 action，检查 action_input
+        if (hasAction) {
+            if (!jsonResponse.action_input || typeof jsonResponse.action_input !== 'object') {
+                errors.push('有 action 时必须包含 action_input 对象');
+            }
+        }
+
+        // 检查不允许的额外字段
+        const allowedFields = ['thought', 'action', 'action_input', 'final_answer'];
+        const extraFields = Object.keys(jsonResponse).filter(key => !allowedFields.includes(key));
+        if (extraFields.length > 0) {
+            errors.push(`包含不允许的字段: ${extraFields.join(', ')}`);
+        }
+
+        return { valid: errors.length === 0, errors };
+    }
+
+    /**
+     * 解析 Agent 响应（文本模式回退）
      */
     private parseAgentResponse(response: string): {
         thought?: string;
