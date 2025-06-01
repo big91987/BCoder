@@ -40,8 +40,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
         webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
 
-        // 使用缓存系统恢复聊天记录 - 改进版
+        // 使用缓存系统恢复聊天记录 - 防重复版
+        let hasRestored = false; // 防止重复恢复
+
         const restoreChat = () => {
+            // 如果已经恢复过或者已清除，跳过
+            if (hasRestored || isCleared) {
+                logger.info('🚫 Skipping restore - already restored or cleared');
+                return;
+            }
+
             const messages = this._chatCache.getCurrentMessages();
             logger.info(`🔄 Attempting to restore ${messages.length} messages from cache`);
 
@@ -92,8 +100,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
                 // 开始发送消息
                 sendNextMessage();
+                hasRestored = true; // 标记已恢复
             } else {
                 logger.info(`📭 No messages to restore, showing empty state`);
+                hasRestored = true; // 即使没有消息也标记已恢复
             }
         };
 
@@ -112,6 +122,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     break;
                 case 'clearChat':
                     isCleared = true; // 设置清除标记
+                    hasRestored = false; // 重置恢复标记，允许新会话恢复
                     this.clearChat();
                     break;
                 case 'webviewReady':
