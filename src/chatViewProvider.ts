@@ -25,6 +25,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         logger.info(`💬 Current messages count: ${currentMessages.length}`);
     }
 
+    // 🔧 添加恢复状态跟踪，防止重复恢复
+    private hasRestored = false;
+
     public resolveWebviewView(
         webviewView: vscode.WebviewView,
         context: vscode.WebviewViewResolveContext,
@@ -38,82 +41,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             localResourceRoots: [this._extensionUri]
         };
 
+        // 🔧 修复：接受VSCode的设计，每次都设置HTML并恢复消息
+        logger.info('🏗️ Setting HTML content for WebView');
         webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
 
-        // 使用缓存系统恢复聊天记录 - 防重复版
-        let hasRestored = false; // 防止重复恢复
-
-        const restoreChat = () => {
-            // 如果已经恢复过或者已清除，跳过
-            if (hasRestored || isCleared) {
-                logger.info('🚫 Skipping restore - already restored or cleared');
-                return;
-            }
-
-            const messages = this._chatCache.getCurrentMessages();
-            logger.info(`🔄 Attempting to restore ${messages.length} messages from cache`);
-
-            if (messages.length > 0) {
-                // 分批恢复消息，避免前端处理冲突
-                let messageIndex = 0;
-                const sendNextMessage = () => {
-                    if (messageIndex >= messages.length || !this._view) {
-                        logger.info(`✅ Successfully restored ${messages.length} messages from cache`);
-                        return;
-                    }
-
-                    const msg = messages[messageIndex];
-                    messageIndex++;
-
-                    // 跳过空的助手消息
-                    if (msg.role === 'assistant' && !msg.messageType && !msg.content.trim()) {
-                        logger.info(`⏭️ Skipping empty assistant message: ${msg.id}`);
-                        setTimeout(sendNextMessage, 10); // 快速跳过
-                        return;
-                    }
-
-                    if (msg.messageType) {
-                        // 结构化消息：直接恢复
-                        logger.info(`🔄 Restoring structured message: ${msg.messageType} - "${msg.content}"`);
-                        this._view.webview.postMessage({
-                            type: 'agentMessage',
-                            messageType: msg.messageType,
-                            content: msg.content,
-                            data: msg.data || {},
-                            timestamp: msg.timestamp
-                        });
-                    } else {
-                        // 普通消息：转换为对应的消息类型
-                        logger.info(`🔄 Restoring regular message: ${msg.role} - "${msg.content}"`);
-                        this._view.webview.postMessage({
-                            type: 'agentMessage',
-                            messageType: msg.role === 'user' ? 'user_message' : 'assistant_message',
-                            content: msg.content,
-                            data: {},
-                            timestamp: msg.timestamp
-                        });
-                    }
-
-                    // 延迟发送下一条消息，避免前端处理冲突
-                    setTimeout(sendNextMessage, 50);
-                };
-
-                // 开始发送消息
-                sendNextMessage();
-                hasRestored = true; // 标记已恢复
-            } else {
-                logger.info(`📭 No messages to restore, showing empty state`);
-                hasRestored = true; // 即使没有消息也标记已恢复
-            }
-        };
-
-        // 简化恢复策略 - 只在页面加载时尝试一次
-        let isCleared = false;
-        setTimeout(() => {
-            if (!isCleared) {
-                restoreChat();
-            }
-        }, 100);
+        // 🔧 重置恢复状态，允许新的WebView恢复
+        this.hasRestored = false;
+        logger.info('🔄 WebView created/recreated, waiting for webviewReady event to restore messages');
 
         webviewView.webview.onDidReceiveMessage(async (data) => {
             switch (data.type) {
@@ -121,15 +55,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     await this.handleUserMessage(data.message);
                     break;
                 case 'clearChat':
-                    isCleared = true; // 设置清除标记
-                    hasRestored = false; // 重置恢复标记，允许新会话恢复
+                    logger.info('🗑️ Clear chat button clicked');
                     this.clearChat();
                     break;
                 case 'webviewReady':
-                    // webview 已完全加载，立即恢复聊天记录
-                    logger.info('🎯 Webview ready event received, restoring chat immediately');
-                    if (!isCleared) {
-                        restoreChat();
+                    // 🔧 WebView准备就绪，触发恢复（防重复恢复）
+                    logger.info('🎯 Webview ready event received');
+                    if (!this.hasRestored) {
+                        logger.info('🔄 Starting message restore...');
+                        const cachedMessages = this._chatCache.getCurrentMessages();
+                        if (cachedMessages.length > 0) {
+                            this.hasRestored = true; // 标记为已恢复
+                            this.restoreMessagesFromCache(cachedMessages);
+                        } else {
+                            logger.info('📭 No messages to restore');
+                            this.hasRestored = true; // 即使没有消息也标记为已恢复
+                        }
+                    } else {
+                        logger.info('⏭️ Skipping restore - already restored');
                     }
                     break;
                 case 'frontendDebug':
@@ -140,8 +83,75 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                         logger.info(data.message);
                     }
                     break;
+                case 'forceRestore':
+                    // 强制恢复聊天记录（用于调试）
+                    logger.info('🔧 Force restore requested');
+                    {
+                        const cachedMessages = this._chatCache.getCurrentMessages();
+                        this.restoreMessagesFromCache(cachedMessages);
+                    }
+                    break;
             }
         });
+    }
+
+    /**
+     * 简化的消息恢复方法
+     */
+    private restoreMessagesFromCache(messages: any[]) {
+        logger.info(`🔄 Restoring ${messages.length} messages from cache`);
+
+        if (!this._view) {
+            logger.warn('⚠️ No webview available for restore');
+            return;
+        }
+
+        // 分批发送消息，避免前端处理冲突
+        let messageIndex = 0;
+        const sendNextMessage = () => {
+            if (messageIndex >= messages.length) {
+                logger.info(`✅ Successfully restored ${messages.length} messages`);
+                return;
+            }
+
+            const msg = messages[messageIndex];
+            messageIndex++;
+
+            // 跳过空消息和流式消息
+            if (!msg.content?.trim() ||
+                msg.messageType === 'streaming_start' ||
+                msg.messageType === 'streaming_delta' ||
+                msg.messageType === 'streaming_complete') {
+                setTimeout(sendNextMessage, 10);
+                return;
+            }
+
+            // 发送消息到前端
+            if (msg.messageType) {
+                // 结构化消息
+                this._view!.webview.postMessage({
+                    type: 'agentMessage',
+                    messageType: msg.messageType,
+                    content: msg.content,
+                    data: msg.data || {},
+                    timestamp: msg.timestamp
+                });
+            } else {
+                // 普通消息
+                this._view!.webview.postMessage({
+                    type: 'agentMessage',
+                    messageType: msg.role === 'user' ? 'user_message' : 'assistant_message',
+                    content: msg.content,
+                    data: {},
+                    timestamp: msg.timestamp
+                });
+            }
+
+            // 延迟发送下一条消息
+            setTimeout(sendNextMessage, 50);
+        };
+
+        sendNextMessage();
     }
 
     private async handleUserMessage(message: string) {
@@ -223,7 +233,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             this._chatProvider.clearHistory();
         }
 
-        // 3. 清除前端界面
+        // 3. 重置恢复状态
+        this.hasRestored = false;
+
+        // 4. 清除前端界面
         if (this._view) {
             this._view.webview.postMessage({
                 type: 'agentMessage',
@@ -237,13 +250,49 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         logger.info('✅ Chat cleared completely');
     }
 
+    // 流式消息累积器
+    private streamingAccumulator: string = '';
+    private isStreamingActive: boolean = false;
+
     private handleAgentMessage(agentMessage: any) {
         logger.debug(`[CHAT] [${agentMessage.sessionId || 'unknown'}] Agent message: ${agentMessage.type}`, {
             content: agentMessage.content
         });
 
-        // 将结构化消息保存到缓存
-        this._chatCache.addStructuredMessage(agentMessage.type, agentMessage.content, agentMessage.data || agentMessage.metadata);
+        // 🔧 修复：流式消息处理逻辑
+        logger.debug(`🔧 [STREAMING] Processing message type: ${agentMessage.type}`);
+
+        if (agentMessage.type === 'streaming_start') {
+            // 开始流式消息，重置累积器
+            logger.debug(`🔧 [STREAMING] Starting stream, content: "${agentMessage.content}"`);
+            this.streamingAccumulator = agentMessage.content || '';
+            this.isStreamingActive = true;
+            // 不保存到缓存，只发送到前端
+        } else if (agentMessage.type === 'streaming_delta') {
+            // 累积流式内容
+            logger.debug(`🔧 [STREAMING] Delta received, active: ${this.isStreamingActive}, content: "${agentMessage.content}"`);
+            if (this.isStreamingActive) {
+                this.streamingAccumulator += agentMessage.content || '';
+                logger.debug(`🔧 [STREAMING] Accumulated length: ${this.streamingAccumulator.length}`);
+            }
+            // 不保存到缓存，只发送到前端
+        } else if (agentMessage.type === 'streaming_complete') {
+            // 流式完成，保存完整内容到缓存
+            logger.debug(`🔧 [STREAMING] Completing stream, active: ${this.isStreamingActive}, accumulated: "${this.streamingAccumulator}"`);
+            logger.debug(`🔧 [STREAMING] Accumulated length: ${this.streamingAccumulator.length}`);
+            if (this.isStreamingActive) {
+                this._chatCache.addStructuredMessage('text', this.streamingAccumulator, {});
+                logger.debug(`🔧 [STREAMING] Saved complete message to cache as 'text' type with content: "${this.streamingAccumulator}"`);
+                this.isStreamingActive = false;
+                this.streamingAccumulator = '';
+            }
+            // 🔧 修复：需要发送到前端来重置状态
+            // 继续执行，让前端处理 streaming_complete
+        } else {
+            // 非流式消息，正常保存到缓存
+            logger.debug(`🔧 [STREAMING] Non-streaming message, saving to cache: ${agentMessage.type}`);
+            this._chatCache.addStructuredMessage(agentMessage.type, agentMessage.content, agentMessage.data || agentMessage.metadata);
+        }
 
         // 发送结构化消息到前端 - 支持新旧两种格式
         if (this._view) {
@@ -315,6 +364,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 }
 
                 .clear-btn:hover {
+                    background-color: var(--vscode-toolbar-hoverBackground);
+                }
+
+                .restore-btn {
+                    background: none;
+                    border: none;
+                    color: var(--vscode-textLink-foreground);
+                    cursor: pointer;
+                    font-size: 12px;
+                    padding: 4px 8px;
+                    border-radius: 3px;
+                    margin-left: 5px;
+                }
+
+                .restore-btn:hover {
                     background-color: var(--vscode-toolbar-hoverBackground);
                 }
 
@@ -510,6 +574,45 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     50% { opacity: 0.4; }
                 }
 
+                /* 流式消息样式 */
+                .message.streaming {
+                    position: relative;
+                }
+
+                .streaming-cursor {
+                    display: inline-block;
+                    background-color: var(--vscode-textLink-foreground);
+                    width: 2px;
+                    height: 1em;
+                    margin-left: 2px;
+                    animation: blink 1s infinite;
+                }
+
+                @keyframes blink {
+                    0%, 50% { opacity: 1; }
+                    51%, 100% { opacity: 0; }
+                }
+
+                .message.streaming .message-content {
+                    position: relative;
+                }
+
+                /* 角色名称样式 */
+                .role-header {
+                    font-size: 11px;
+                    font-weight: bold;
+                    color: var(--vscode-textLink-foreground);
+                    margin-bottom: 4px;
+                    opacity: 0.8;
+                }
+
+                .role-name {
+                    background-color: var(--vscode-badge-background);
+                    color: var(--vscode-badge-foreground);
+                    padding: 2px 6px;
+                    border-radius: 3px;
+                }
+
                 .input-container {
                     padding: 10px;
                     border-top: 1px solid var(--vscode-panel-border);
@@ -636,7 +739,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         <body>
             <div class="chat-header">
                 <div class="chat-title">💬 BCoder Chat</div>
-                <button class="clear-btn" onclick="clearChat()">🗑️ Clear</button>
+                <div>
+                    <button class="restore-btn" onclick="forceRestore()">🔄 Restore</button>
+                    <button class="clear-btn" onclick="clearChat()">🗑️ Clear</button>
+                </div>
             </div>
 
             <div class="chat-container" id="chatContainer">
@@ -702,7 +808,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 }
 
                 function clearChat() {
+                    console.log('🗑️ [Frontend] Clear button clicked, sending clearChat message');
                     vscode.postMessage({ type: 'clearChat' });
+                }
+
+                function forceRestore() {
+                    console.log('🔄 [Frontend] Force restore button clicked, sending forceRestore message');
+                    vscode.postMessage({ type: 'forceRestore' });
                 }
 
                 function updateSendButton() {
@@ -1082,6 +1194,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     container.scrollTop = container.scrollHeight;
                 }
 
+                // 全局变量：当前流式消息元素
+                let currentStreamingElement = null;
+
                 function handleAgentMessage(message) {
                     // 发送详细调试信息到后端日志
                     vscode.postMessage({
@@ -1111,9 +1226,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     });
 
                     const container = document.getElementById('chatContainer');
+                    // 修正：优先使用 messageType，因为 type 可能是 "agentMessage"
+                    const messageType = message.messageType || message.type;
 
                     // Handle clear message
-                    if (message.messageType === 'clear') {
+                    if (messageType === 'clear') {
+                        console.log('🗑️ [Frontend] Received clear message, clearing chat container');
                         container.innerHTML = \`
                             <div class="empty-state">
                                 <h3>👋 Hello!</h3>
@@ -1121,7 +1239,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                             </div>
                         \`;
                         isTyping = false;
+                        currentStreamingElement = null;
                         updateSendButton();
+                        console.log('✅ [Frontend] Chat container cleared successfully');
+                        return;
+                    }
+
+                    // Handle streaming messages
+                    if (messageType === 'streaming_start') {
+                        createStreamingMessage(message.content);
+                        return;
+                    }
+
+                    if (messageType === 'streaming_delta') {
+                        appendToStreamingMessage(message.content);
+                        return;
+                    }
+
+                    if (messageType === 'streaming_complete') {
+                        finalizeStreamingMessage();
                         return;
                     }
 
@@ -1164,15 +1300,82 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
                     container.appendChild(messageElement);
 
-                    // 简化版：只有 text 和 error 类型重置 typing 状态
-                    const messageType = message.type || message.messageType;
-                    if (messageType === 'text' || messageType === 'error') {
+                    // 重置 typing 状态 - 包括 task_complete 类型
+                    const messageTypeForReset = message.type || message.messageType;
+                    if (messageTypeForReset === 'text' || messageTypeForReset === 'error' || messageTypeForReset === 'task_complete') {
                         isTyping = false;
                         updateSendButton();
+                        console.log('🔄 [Frontend] Reset typing state for message type:', messageTypeForReset);
                     }
 
                     // Scroll to bottom
                     container.scrollTop = container.scrollHeight;
+                }
+
+                // 流式消息处理函数
+                function createStreamingMessage(initialContent) {
+                    const container = document.getElementById('chatContainer');
+
+                    // 移除空状态和打字指示器
+                    const emptyState = container.querySelector('.empty-state');
+                    if (emptyState) emptyState.remove();
+
+                    const typingIndicator = container.querySelector('.typing-indicator');
+                    if (typingIndicator) typingIndicator.remove();
+
+                    // 创建流式消息容器
+                    const messageDiv = document.createElement('div');
+                    messageDiv.className = 'message assistant streaming';
+                    messageDiv.innerHTML = \`
+                        <div class="role-header">
+                            <span class="role-name">BCoder</span>
+                        </div>
+                        <div class="message-content" id="streaming-content">\${initialContent}</div>
+                        <div class="streaming-cursor">▊</div>
+                        <div class="timestamp">\${new Date().toLocaleTimeString()}</div>
+                    \`;
+
+                    container.appendChild(messageDiv);
+                    currentStreamingElement = messageDiv.querySelector('#streaming-content');
+
+                    // 滚动到底部
+                    container.scrollTop = container.scrollHeight;
+
+                    console.log('🌊 [Frontend] Created streaming message with initial content:', initialContent);
+                }
+
+                function appendToStreamingMessage(deltaContent) {
+                    if (currentStreamingElement) {
+                        currentStreamingElement.textContent += deltaContent;
+
+                        // 滚动到底部
+                        const container = document.getElementById('chatContainer');
+                        container.scrollTop = container.scrollHeight;
+
+                        console.log('🌊 [Frontend] Appended to streaming message:', deltaContent);
+                    } else {
+                        console.warn('🌊 [Frontend] No current streaming element to append to');
+                    }
+                }
+
+                function finalizeStreamingMessage() {
+                    if (currentStreamingElement) {
+                        // 移除光标
+                        const cursor = currentStreamingElement.parentElement.querySelector('.streaming-cursor');
+                        if (cursor) cursor.remove();
+
+                        // 移除 streaming 类
+                        const messageDiv = currentStreamingElement.closest('.message');
+                        if (messageDiv) {
+                            messageDiv.classList.remove('streaming');
+                        }
+
+                        currentStreamingElement = null;
+                        isTyping = false;
+                        updateSendButton();
+
+                        console.log('🌊 [Frontend] Finalized streaming message');
+                    }
                 }
             </script>
         </body>

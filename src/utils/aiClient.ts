@@ -57,6 +57,35 @@ export class AIClient {
         return this.apiChatStream(prompt, history, onChunk);
     }
 
+    // 新增：异步迭代器版本的流式聊天
+    async *chatStreamIterator(prompt: string, history: ChatMessage[] = []): AsyncGenerator<string, string, unknown> {
+        if (!this.apiEndpoint || !this.apiKey) {
+            throw new Error('API endpoint and API key must be configured. Please go to Settings to configure them.');
+        }
+
+        // 简化实现：直接使用现有的 chatStream 方法
+        let fullContent = '';
+        const chunks: string[] = [];
+
+        try {
+            // 使用现有的流式方法
+            await this.chatStream(prompt, history, (chunk: string) => {
+                chunks.push(chunk);
+                fullContent += chunk;
+            });
+
+            // 逐个 yield 所有收到的 chunks
+            for (const chunk of chunks) {
+                yield chunk;
+            }
+
+            return fullContent;
+        } catch (error) {
+            logger.error('chatStreamIterator error:', error);
+            throw error;
+        }
+    }
+
     async complete(prompt: string): Promise<string> {
         if (!this.apiEndpoint || !this.apiKey) {
             throw new Error('API endpoint and API key must be configured. Please go to Settings to configure them.');
@@ -73,17 +102,31 @@ export class AIClient {
             logger.info('apiEndpoint:', this.apiEndpoint);
             logger.info('apiKey:', this.apiKey ? this.apiKey.substring(0, 8) + '...' : 'not set');
 
-            const messages: ChatMessage[] = [
-                {
-                    role: 'system',
-                    content: promptManager.getSystemPrompt()
-                },
-                ...history.slice(-10), // Keep last 10 messages for context
-                {
-                    role: 'user',
-                    content: prompt
-                }
-            ];
+            // 使用传入的历史消息，如果第一条是 system 消息就使用它，否则使用默认的
+            let messages: ChatMessage[];
+            if (history.length > 0 && history[0].role === 'system') {
+                // 使用传入的系统消息
+                messages = [
+                    ...history.slice(-10), // Keep last 10 messages for context
+                    {
+                        role: 'user',
+                        content: prompt
+                    }
+                ];
+            } else {
+                // 使用默认系统消息
+                messages = [
+                    {
+                        role: 'system',
+                        content: promptManager.getSystemPrompt()
+                    },
+                    ...history.slice(-10), // Keep last 10 messages for context
+                    {
+                        role: 'user',
+                        content: prompt
+                    }
+                ];
+            }
 
             logger.info('=== API REQUEST DEBUG ===');
             logger.info('Endpoint:', this.apiEndpoint);

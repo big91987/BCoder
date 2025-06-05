@@ -65,10 +65,15 @@ export enum MessageType {
     // 3. 思考过程
     THINKING = 'thinking',   // Agent 思考过程
 
-    // 4. 错误信息
+    // 4. 流式输出
+    STREAMING_START = 'streaming_start',       // 开始流式输出
+    STREAMING_DELTA = 'streaming_delta',       // 流式增量内容
+    STREAMING_COMPLETE = 'streaming_complete', // 流式输出完成
+
+    // 5. 错误信息
     ERROR = 'error',         // 错误消息
 
-    // 5. 系统控制
+    // 6. 系统控制
     CLEAR = 'clear'          // 清除聊天
 }
 
@@ -131,7 +136,7 @@ export class MessageBuilder {
     }
 
     build(): StandardMessage {
-        if (!this.message.role || !this.message.type || !this.message.content) {
+        if (!this.message.role || !this.message.type || this.message.content === undefined) {
             throw new Error('Message must have role, type, and content');
         }
         return this.message as StandardMessage;
@@ -188,6 +193,31 @@ export class MessageFactory {
         return MessageBuilder.create()
             .role(MessageRole.SYSTEM)
             .type(MessageType.CLEAR)
+            .content('')
+            .build();
+    }
+
+    // 流式消息工厂方法
+    static streamingStart(content: string): StandardMessage {
+        return MessageBuilder.create()
+            .role(MessageRole.ASSISTANT)
+            .type(MessageType.STREAMING_START)
+            .content(content)
+            .build();
+    }
+
+    static streamingDelta(content: string): StandardMessage {
+        return MessageBuilder.create()
+            .role(MessageRole.ASSISTANT)
+            .type(MessageType.STREAMING_DELTA)
+            .content(content)
+            .build();
+    }
+
+    static streamingComplete(): StandardMessage {
+        return MessageBuilder.create()
+            .role(MessageRole.ASSISTANT)
+            .type(MessageType.STREAMING_COMPLETE)
             .content('')
             .build();
     }

@@ -4,6 +4,7 @@ import { AIClient } from '../utils/aiClient';
 import { logger } from '../utils/logger';
 import { StandardMessage, MessageRole, MessageType, MessageFactory, MessageBuilder } from '../types/message';
 
+
 /**
  * BCoder 默认 Agent 实现
  * 基于 OPAR 循环的智能代码助手
@@ -149,43 +150,32 @@ export class BCoderAgent implements IAgent {
         logger.info(toolDescriptions);
         logger.info('=== END TOOL DEFINITIONS DEBUG ===');
 
-        // 系统提示词 - 不硬编码用户问题，支持多轮对话
+        // 系统提示词 - 使用结构化格式，支持流式输出
         const systemPrompt = `你是一个智能代码助手。你可以使用以下工具来帮助用户：
 
 ${toolDescriptions}
 
-请使用 ReAct 模式回答用户问题，并以 JSON 格式输出。
+请严格按照以下格式输出，不要使用JSON格式：
 
-工作流程：
-1. 分析用户问题，思考需要什么信息
-2. 如果需要更多信息，使用工具获取
-3. 如果已有足够信息，直接给出最终答案
+如果需要使用工具：
+THOUGHT: [详细的分析和思考过程]
+ACTION: [工具名称]
+ACTION_INPUT: [JSON格式的工具参数]
 
-JSON 输出格式：
-- 如果需要使用工具：
-{
-  "thought": "分析问题，说明为什么需要这个工具",
-  "action": "工具名称",
-  "action_input": {"参数名": "参数值"}
-}
+如果可以直接回答：
+THOUGHT: [基于已有信息的分析]
+FINAL_ANSWER: [完整的最终答案，可以多行]
 
-- 如果可以直接回答：
-{
-  "thought": "基于已有信息的分析",
-  "final_answer": "完整的最终答案"
-}
+重要规则：
+1. 每个字段必须独占一行，以字段名开头
+2. FINAL_ANSWER 可以包含多行内容
+3. 不要使用JSON格式或其他格式
+4. 严格按照上述格式，不要添加额外的标记
+5. 记住之前的对话内容，保持上下文连贯性
 
 示例：
-- 读取文件: {"action": "read_file", "action_input": {"path": "/path/to/file"}}
-- 列出目录: {"action": "list_files", "action_input": {"path": "/path/to/directory"}}
-- 搜索文件: {"action": "search_files", "action_input": {"pattern": "*.js"}}
-
-重要：
-- 必须输出有效的 JSON 格式
-- 不要自己编造 Observation，等待真实的工具执行结果
-- 收到工具结果后，判断是否需要更多信息还是可以回答
-- 尽量用最少的工具调用完成任务
-- 记住之前的对话内容，保持上下文连贯性`;
+THOUGHT: 用户询问我的身份，我可以直接回答，不需要使用任何工具
+FINAL_ANSWER: 我是一个智能代码助手，可以帮助你处理与文件操作相关的任务，如读取、写入、编辑文件等。`;
 
         // 调试系统提示词
         logger.info('=== SYSTEM PROMPT DEBUG ===');
@@ -240,120 +230,118 @@ JSON 输出格式：
                 logger.info(JSON.stringify(historyMessages, null, 2));
                 logger.info('=== END AICLIENT CALL PARAMS ===');
 
-                const response = await this.aiClient!.chat(currentMessage, historyMessages, true);
+                // 暂时回退到非流式模式，确保基本功能正常
+                logger.info('🔄 Processing with structured format...');
 
-                // 打印 LLM 原始输出
-                logger.info('=== RAW LLM OUTPUT ===');
-                logger.info('RAW RESPONSE STRING:');
-                logger.info(response);
-                logger.info('=== END RAW LLM OUTPUT ===');
+                // 使用流式调用 LLM
+                logger.info('🌊 开始流式调用 LLM...');
 
-                conversation.push({ role: 'assistant' as const, content: response });
+                let fullResponse = '';
+                let currentThought = '';
+                let currentFinalAnswer = '';
+                let hasStartedFinalAnswer = false;
 
-                // 解析 LLM 响应 - 支持 JSON 格式
-                const parseResult = this.parseAgentResponseJson(response);
+                // 🔧 使用对象来确保引用传递
+                const streamState = {
+                    currentFinalAnswer: '',
+                    hasStartedFinalAnswer: false
+                };
+                let hasAction = false;
+                let actionName = '';
+                let actionInput: any = null;
 
-                // 检查是否有解析错误
-                if (parseResult.error) {
-                    logger.error(`🚫 JSON 解析错误: ${parseResult.error}`);
+                let hasShownThought = false;
+                let chunkCount = 0;
 
-                    // 发送错误消息给前端
-                    const errorMsg = MessageFactory.error(
-                        `❌ LLM 输出格式错误: ${parseResult.error}`
-                    );
+                await this.aiClient!.chatStream(currentMessage, historyMessages, (chunk: string) => {
+                    chunkCount++;
+                    fullResponse += chunk;
 
-                    // 调试日志
-                    logger.info(`[msg][error] ❌ LLM 输出格式错误: ${parseResult.error}`);
-                    logger.debug(`[msg][error] metadata: ${JSON.stringify(errorMsg.metadata)}`);
+                    // 实时解析流式内容
+                    const parseResult = this.parseStreamingResponse(fullResponse);
 
-                    callbacks.onMessage(errorMsg);
-                    break; // 结束循环
-                }
-
-                // 打印解析结果
-                logger.info('=== PARSE RESULT ===');
-                logger.info(`Thought: ${parseResult.thought || 'None'}`);
-                logger.info(`Action: ${parseResult.action || 'None'}`);
-                logger.info(`Action Input: ${JSON.stringify(parseResult.actionInput) || 'None'}`);
-                logger.info(`Final Answer: ${parseResult.finalAnswer || 'None'}`);
-                logger.info('=== END PARSE RESULT ===');
-
-                if (parseResult.thought) {
-                    // 发送思考过程给用户
-                    const thinkingMsg = MessageFactory.thinking(parseResult.thought);
-
-                    logger.info(`💭 思考: ${parseResult.thought}`);
-                    callbacks.onMessage(thinkingMsg);
-                }
-
-                if (parseResult.action && parseResult.actionInput) {
-                    // 执行工具
-                    logger.info('=== TOOL EXECUTION ===');
-                    logger.info(`Tool Name: ${parseResult.action}`);
-                    logger.info(`Tool Input: ${JSON.stringify(parseResult.actionInput, null, 2)}`);
-
-                    // 发送工具开始消息 - 使用标准化格式
-                    const actionMessage = this.getActionMessage(parseResult.action, parseResult.actionInput);
-                    const toolStartMsg = MessageFactory.toolMessage(
-                        parseResult.action,
-                        actionMessage
-                    );
-
-                    // 调试日志
-                    logger.info(`[msg][tool_start] ${actionMessage}`);
-                    logger.debug(`[msg][tool_start] metadata: ${JSON.stringify(toolStartMsg.metadata)}`);
-
-                    callbacks.onMessage(toolStartMsg);
-
-                    const toolResult = await this.toolSystem!.executeTool(
-                        parseResult.action,
-                        parseResult.actionInput
-                    );
-
-                    logger.info(`Tool Success: ${toolResult.success}`);
-                    logger.info(`Tool Result: ${JSON.stringify(toolResult.data, null, 2)}`);
-                    if (!toolResult.success) {
-                        logger.info(`Tool Error: ${toolResult.error}`);
+                    // 处理思考内容 - 当检测到 FINAL_ANSWER 开始时，显示完整思考
+                    if (parseResult.thought && !hasShownThought && fullResponse.includes('FINAL_ANSWER:')) {
+                        callbacks.onMessage(MessageFactory.thinking(parseResult.thought));
+                        currentThought = parseResult.thought;
+                        hasShownThought = true;
                     }
-                    logger.info('=== END TOOL EXECUTION ===');
 
-                    const observation = toolResult.success
-                        ? `工具执行成功: ${JSON.stringify(toolResult.data)}`
-                        : `工具执行失败: ${toolResult.error}`;
+                    // 处理最终答案内容 - 流式显示
+                    if (parseResult.finalAnswer) {
+                        if (!streamState.hasStartedFinalAnswer) {
+                            try {
+                                callbacks.onMessage(MessageFactory.streamingStart(''));
+                                streamState.hasStartedFinalAnswer = true;
+                                streamState.currentFinalAnswer = ''; // 从空开始，确保第一次能发送完整内容
+                            } catch (error) {
+                                logger.error(`❌ 流式初始化失败: ${error}`);
+                                streamState.hasStartedFinalAnswer = true; // 防止重复尝试
+                            }
+                        }
 
-                    conversation.push({ role: 'user' as const, content: `Observation: ${observation}` });
+                        // 只有当新内容更长时才处理增量
+                        if (parseResult.finalAnswer.length > streamState.currentFinalAnswer.length) {
+                            const newAnswer = parseResult.finalAnswer.substring(streamState.currentFinalAnswer.length);
+                            if (newAnswer) {
+                                callbacks.onMessage(MessageFactory.streamingDelta(newAnswer));
+                                streamState.currentFinalAnswer = parseResult.finalAnswer;
+                            }
+                        }
 
-                    // 发送工具完成消息 - 使用标准化格式
-                    const completeMessage = this.getCompleteMessage(parseResult.action, toolResult, parseResult.actionInput);
-                    const toolCompleteMsg = MessageFactory.toolMessage(
-                        parseResult.action,
-                        completeMessage,
-                        toolResult.success,
-                        toolResult.data
-                    );
+                        // 同步到外部变量
+                        currentFinalAnswer = streamState.currentFinalAnswer;
+                        hasStartedFinalAnswer = streamState.hasStartedFinalAnswer;
+                    }
 
-                    // 调试日志
-                    logger.info(`[msg][${toolCompleteMsg.type}] ${completeMessage}`);
-                    logger.debug(`[msg][${toolCompleteMsg.type}] metadata: ${JSON.stringify(toolCompleteMsg.metadata)}`);
+                    // 检查是否有工具调用
+                    if (parseResult.action) {
+                        actionName = parseResult.action;
+                        // 🔧 修复：只有当actionInput不为null时才设置hasAction为true
+                        if (parseResult.actionInput !== null && parseResult.actionInput !== undefined) {
+                            actionInput = parseResult.actionInput;
+                            hasAction = true;
+                        } else {
+                            // 如果actionInput还没有解析成功，保持hasAction为false
+                            hasAction = false;
+                        }
+                    }
+                });
 
-                    callbacks.onMessage(toolCompleteMsg);
+                conversation.push({ role: 'assistant' as const, content: fullResponse });
 
-                    // 调试：工具执行后继续循环
-                    logger.info(`🔄 工具执行完成，继续下一轮循环 (iteration ${iteration})`);
+                logger.info(`🎯 流式处理完成 - 思考: ${!!currentThought}, 工具: ${actionName || 'None'}, 答案: ${!!currentFinalAnswer}`);
+
+
+
+                // 如果有工具需要执行
+                if (hasAction && actionName && actionInput) {
+                    logger.info('✅ 工具执行条件满足，开始执行工具');
+                    await this.executeToolAndContinue(actionName, actionInput, conversation, callbacks);
+                    // 工具执行后继续下一轮循环
+                    continue;
+                } else {
+                    logger.warn(`❌ 工具执行条件不满足: hasAction=${hasAction}, actionName="${actionName}", actionInput=${JSON.stringify(actionInput)}`);
                 }
 
-                if (parseResult.finalAnswer) {
-                    finalAnswer = parseResult.finalAnswer;
-                    // 发送普通助手消息给用户
-                    const assistantMsg = MessageFactory.assistantMessage(parseResult.finalAnswer);
-
-                    // 调试日志
-                    logger.info(`[msg][assistant] 发送回答给用户`);
-                    logger.debug(`[msg][assistant] content: ${parseResult.finalAnswer}`);
-
-                    callbacks.onMessage(assistantMsg);
-                    break;
+                // 如果有最终答案，结束循环
+                if (currentFinalAnswer) {
+                    if (hasStartedFinalAnswer) {
+                        callbacks.onMessage(MessageFactory.streamingComplete());
+                    }
+                    finalAnswer = currentFinalAnswer;
+                    break; // 明确终止循环
                 }
+
+                // 如果既没有工具也没有最终答案，说明有 bug，直接报错
+                if (!hasAction && !currentFinalAnswer) {
+                    const errorMsg = `❌ 流式解析失败：hasAction=${hasAction}, currentFinalAnswer="${currentFinalAnswer}", fullResponse="${fullResponse}"`;
+                    logger.error(errorMsg);
+                    callbacks.onMessage(MessageFactory.error(errorMsg));
+                    throw new Error('流式解析失败，请检查 LLM 响应格式或解析逻辑');
+                }
+
+
 
             } catch (error) {
                 const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -465,117 +453,14 @@ JSON 输出格式：
         }
     }
 
-    /**
-     * 解析 Agent JSON 响应
-     */
-    private parseAgentResponseJson(response: string): {
-        thought?: string;
-        action?: string;
-        actionInput?: any;
-        finalAnswer?: string;
-        error?: string;
-    } {
-        try {
-            // 尝试解析 JSON 响应
-            const jsonResponse = JSON.parse(response);
 
-            logger.info('=== JSON PARSE SUCCESS ===');
-            logger.info('Parsed JSON:', JSON.stringify(jsonResponse, null, 2));
 
-            // 严格的 JSON 格式校验
-            const validationResult = this.validateJsonResponse(jsonResponse);
-            if (!validationResult.valid) {
-                logger.error('=== JSON VALIDATION FAILED ===');
-                logger.error('Validation errors:', validationResult.errors);
 
-                // 返回错误信息而不是抛出异常
-                return {
-                    error: `JSON 格式校验失败: ${validationResult.errors.join(', ')}`
-                };
-            }
-
-            logger.info('=== JSON VALIDATION SUCCESS ===');
-
-            const result: any = {};
-
-            if (jsonResponse.thought) {
-                result.thought = jsonResponse.thought;
-            }
-
-            if (jsonResponse.action) {
-                result.action = jsonResponse.action;
-                result.actionInput = jsonResponse.action_input || {};
-            }
-
-            if (jsonResponse.final_answer) {
-                result.finalAnswer = jsonResponse.final_answer;
-            }
-
-            logger.info('=== JSON PARSE RESULT ===');
-            logger.info('Final result:', JSON.stringify(result, null, 2));
-
-            return result;
-
-        } catch (error) {
-            logger.error('JSON parsing failed:', error);
-
-            // 返回错误信息而不是抛出异常
-            return {
-                error: `LLM 输出格式错误: ${error instanceof Error ? error.message : 'JSON 解析失败'}`
-            };
-        }
-    }
 
     /**
-     * 验证 JSON 响应格式
+     * 解析流式响应（实时解析，支持单行和多行格式）
      */
-    private validateJsonResponse(jsonResponse: any): { valid: boolean; errors: string[] } {
-        const errors: string[] = [];
-
-        // 检查是否是对象
-        if (typeof jsonResponse !== 'object' || jsonResponse === null || Array.isArray(jsonResponse)) {
-            errors.push('响应必须是一个对象');
-            return { valid: false, errors };
-        }
-
-        // 必须包含 thought 字段
-        if (!jsonResponse.thought || typeof jsonResponse.thought !== 'string') {
-            errors.push('缺少必需的 thought 字段或类型不正确');
-        }
-
-        // 检查是否有 action 或 final_answer
-        const hasAction = jsonResponse.action && typeof jsonResponse.action === 'string';
-        const hasFinalAnswer = jsonResponse.final_answer && typeof jsonResponse.final_answer === 'string';
-
-        if (!hasAction && !hasFinalAnswer) {
-            errors.push('必须包含 action 或 final_answer 字段之一');
-        }
-
-        if (hasAction && hasFinalAnswer) {
-            errors.push('不能同时包含 action 和 final_answer 字段');
-        }
-
-        // 如果有 action，检查 action_input
-        if (hasAction) {
-            if (!jsonResponse.action_input || typeof jsonResponse.action_input !== 'object') {
-                errors.push('有 action 时必须包含 action_input 对象');
-            }
-        }
-
-        // 检查不允许的额外字段
-        const allowedFields = ['thought', 'action', 'action_input', 'final_answer'];
-        const extraFields = Object.keys(jsonResponse).filter(key => !allowedFields.includes(key));
-        if (extraFields.length > 0) {
-            errors.push(`包含不允许的字段: ${extraFields.join(', ')}`);
-        }
-
-        return { valid: errors.length === 0, errors };
-    }
-
-    /**
-     * 解析 Agent 响应（文本模式回退）
-     */
-    private parseAgentResponse(response: string): {
+    private parseStreamingResponse(partialResponse: string): {
         thought?: string;
         action?: string;
         actionInput?: any;
@@ -583,32 +468,39 @@ JSON 输出格式：
     } {
         const result: any = {};
 
-        // 解析 Thought
-        const thoughtMatch = response.match(/Thought:\s*(.+?)(?=\n(?:Action|Final Answer)|$)/s);
+        // 解析 THOUGHT（支持单行和多行格式，包括换行符）
+        const thoughtMatch = partialResponse.match(/THOUGHT:\s*(.+?)(?=\s*(?:ACTION|FINAL_ANSWER)|$)/s);
         if (thoughtMatch) {
             result.thought = thoughtMatch[1].trim();
         }
 
-        // 解析 Action
-        const actionMatch = response.match(/Action:\s*(.+?)(?=\n|$)/);
+        // 解析 ACTION（必须完整）
+        const actionMatch = partialResponse.match(/ACTION:\s*(.+?)(?=\s*(?:ACTION_INPUT|THOUGHT|FINAL_ANSWER)|$)/s);
         if (actionMatch) {
             result.action = actionMatch[1].trim();
         }
 
-        // 解析 Action Input
-        const actionInputMatch = response.match(/Action Input:\s*(.+?)(?=\n(?:Observation|Thought|Final Answer)|$)/s);
+        // 解析 ACTION_INPUT（必须完整）
+        const actionInputMatch = partialResponse.match(/ACTION_INPUT:\s*(.+?)(?=\s*(?:THOUGHT|FINAL_ANSWER)|$)/s);
         if (actionInputMatch) {
+            const rawActionInput = actionInputMatch[1].trim();
             try {
-                result.actionInput = JSON.parse(actionInputMatch[1].trim());
-            } catch {
-                result.actionInput = { query: actionInputMatch[1].trim() };
+                result.actionInput = JSON.parse(rawActionInput);
+            } catch (error) {
+                // 如果 JSON 解析失败，可能是不完整的，暂时不处理
+                result.actionInput = null;
             }
         }
 
-        // 解析 Final Answer
-        const finalAnswerMatch = response.match(/Final Answer:\s*(.+?)$/s);
+        // 解析 FINAL_ANSWER（支持单行和多行格式，包括换行符）
+        const finalAnswerMatch = partialResponse.match(/FINAL_ANSWER:\s*(.+?)$/s);
         if (finalAnswerMatch) {
             result.finalAnswer = finalAnswerMatch[1].trim();
+        }
+
+        // 保留关键调试信息
+        if (partialResponse.includes('FINAL_ANSWER:') && result.finalAnswer) {
+            logger.debug(`📝 解析到最终答案 (长度: ${result.finalAnswer.length})`);
         }
 
         return result;
@@ -633,4 +525,54 @@ JSON 输出格式：
             progress: 0
         };
     }
+
+
+
+    /**
+     * 执行工具并继续对话
+     */
+    private async executeToolAndContinue(
+        action: string,
+        actionInput: any,
+        conversation: Array<{role: 'system' | 'user' | 'assistant', content: string}>,
+        callbacks: AgentCallbacks
+    ): Promise<void> {
+        logger.info('=== TOOL EXECUTION ===');
+        logger.info(`Tool Name: ${action}`);
+        logger.info(`Tool Input: ${JSON.stringify(actionInput, null, 2)}`);
+
+        // 发送工具开始消息
+        const actionMessage = this.getActionMessage(action, actionInput);
+        const toolStartMsg = MessageFactory.toolMessage(action, actionMessage);
+        callbacks.onMessage(toolStartMsg);
+
+        // 执行工具
+        const toolResult = await this.toolSystem!.executeTool(action, actionInput);
+
+        logger.info(`Tool Success: ${toolResult.success}`);
+        logger.info(`Tool Result: ${JSON.stringify(toolResult.data, null, 2)}`);
+        if (!toolResult.success) {
+            logger.info(`Tool Error: ${toolResult.error}`);
+        }
+        logger.info('=== END TOOL EXECUTION ===');
+
+        // 添加观察结果到对话历史
+        const observation = toolResult.success
+            ? `工具执行成功: ${JSON.stringify(toolResult.data)}`
+            : `工具执行失败: ${toolResult.error}`;
+
+        conversation.push({ role: 'user' as const, content: `Observation: ${observation}` });
+
+        // 发送工具完成消息
+        const completeMessage = this.getCompleteMessage(action, toolResult, actionInput);
+        const toolCompleteMsg = MessageFactory.toolMessage(
+            action,
+            completeMessage,
+            toolResult.success,
+            toolResult.data
+        );
+        callbacks.onMessage(toolCompleteMsg);
+    }
+
+
 }
