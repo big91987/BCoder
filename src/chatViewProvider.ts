@@ -117,11 +117,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             const msg = messages[messageIndex];
             messageIndex++;
 
-            // 跳过空消息和流式消息
+            // 🔧 修复：跳过空消息和所有不应该恢复的消息类型
             if (!msg.content?.trim() ||
+                // 旧的流式消息类型
                 msg.messageType === 'streaming_start' ||
                 msg.messageType === 'streaming_delta' ||
-                msg.messageType === 'streaming_complete') {
+                msg.messageType === 'streaming_complete' ||
+                // 新的标准化消息类型 - 只恢复完整的消息，不恢复流式片段
+                msg.messageType === 'think' ||  // 思考消息通常是流式的，不恢复
+                msg.messageType === 'progress' || // 进度消息不恢复
+                msg.messageType === 'tool_start' || // 工具开始消息不恢复
+                msg.messageType === 'tool_error'   // 工具错误消息不恢复
+            ) {
+                logger.debug(`🔧 [RESTORE] Skipping message: type=${msg.messageType}, content="${msg.content?.substring(0, 50)}"`);
                 setTimeout(sendNextMessage, 10);
                 return;
             }
@@ -165,10 +173,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         const messagesAfterAdd = this._chatCache.getCurrentMessages();
         logger.info(`📊 Messages count after add: ${messagesAfterAdd.length}`);
 
-        // 发送用户消息到前端
+        // 🔧 修复：发送用户消息到前端，使用正确的消息类型
         if (this._view) {
             this._view.webview.postMessage({
-                type: 'agentMessage',
+                type: 'userMessage',  // 🔧 修复：用户消息应该是 userMessage，不是 agentMessage
                 messageType: 'user_message',
                 content: message,
                 data: {},
@@ -255,43 +263,67 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private isStreamingActive: boolean = false;
 
     private handleAgentMessage(agentMessage: any) {
+        // 🔧 打印原始消息对象
+        logger.info('🔍🔍🔍 [RAW MSG] ===== ORIGINAL MESSAGE DUMP =====');
+        logger.info('🔍🔍🔍 [RAW MSG] FULL OBJECT:', JSON.stringify(agentMessage, null, 2));
+        logger.info('🔍🔍🔍 [RAW MSG] ===== END DUMP =====');
+
         logger.debug(`[CHAT] [${agentMessage.sessionId || 'unknown'}] Agent message: ${agentMessage.type}`, {
             content: agentMessage.content
         });
 
-        // 🔧 修复：流式消息处理逻辑
-        logger.debug(`🔧 [STREAMING] Processing message type: ${agentMessage.type}`);
+        // 🔧 新的标准化流式消息处理逻辑
+        logger.debug(`🔧 [STREAMING] Processing message: type=${agentMessage.type}, status=${agentMessage.status}`);
 
-        if (agentMessage.type === 'streaming_start') {
-            // 开始流式消息，重置累积器
-            logger.debug(`🔧 [STREAMING] Starting stream, content: "${agentMessage.content}"`);
-            this.streamingAccumulator = agentMessage.content || '';
-            this.isStreamingActive = true;
-            // 不保存到缓存，只发送到前端
-        } else if (agentMessage.type === 'streaming_delta') {
-            // 累积流式内容
-            logger.debug(`🔧 [STREAMING] Delta received, active: ${this.isStreamingActive}, content: "${agentMessage.content}"`);
-            if (this.isStreamingActive) {
-                this.streamingAccumulator += agentMessage.content || '';
-                logger.debug(`🔧 [STREAMING] Accumulated length: ${this.streamingAccumulator.length}`);
+        // 检查是否为新的标准化消息格式
+        if (agentMessage.status) {
+            // 新的标准化消息格式：start/delta/end
+            if (agentMessage.status === 'start') {
+                // 开始流式消息，重置累积器
+                logger.debug(`🔧 [STREAMING] Starting ${agentMessage.type} stream`);
+                this.streamingAccumulator = agentMessage.content || '';
+                this.isStreamingActive = true;
+                // 不保存到缓存，只发送到前端
+            } else if (agentMessage.status === 'delta') {
+                // 累积流式内容
+                logger.debug(`🔧 [STREAMING] Delta for ${agentMessage.type}: "${agentMessage.content}"`);
+                if (this.isStreamingActive) {
+                    this.streamingAccumulator += agentMessage.content || '';
+                }
+                // 不保存到缓存，只发送到前端
+            } else if (agentMessage.status === 'end') {
+                // 流式完成，保存完整内容到缓存
+                logger.debug(`🔧 [STREAMING] Ending ${agentMessage.type} stream, final content: "${agentMessage.content}"`);
+                if (this.isStreamingActive) {
+                    // 使用end消息的完整内容，而不是累积的内容
+                    const finalContent = agentMessage.content || this.streamingAccumulator;
+                    this._chatCache.addStructuredMessage(agentMessage.type, finalContent, agentMessage.metadata || {});
+                    logger.debug(`🔧 [STREAMING] Saved complete ${agentMessage.type} message to cache`);
+                    this.isStreamingActive = false;
+                    this.streamingAccumulator = '';
+                }
+                // 继续发送到前端
             }
-            // 不保存到缓存，只发送到前端
-        } else if (agentMessage.type === 'streaming_complete') {
-            // 流式完成，保存完整内容到缓存
-            logger.debug(`🔧 [STREAMING] Completing stream, active: ${this.isStreamingActive}, accumulated: "${this.streamingAccumulator}"`);
-            logger.debug(`🔧 [STREAMING] Accumulated length: ${this.streamingAccumulator.length}`);
-            if (this.isStreamingActive) {
-                this._chatCache.addStructuredMessage('text', this.streamingAccumulator, {});
-                logger.debug(`🔧 [STREAMING] Saved complete message to cache as 'text' type with content: "${this.streamingAccumulator}"`);
-                this.isStreamingActive = false;
-                this.streamingAccumulator = '';
-            }
-            // 🔧 修复：需要发送到前端来重置状态
-            // 继续执行，让前端处理 streaming_complete
         } else {
-            // 非流式消息，正常保存到缓存
-            logger.debug(`🔧 [STREAMING] Non-streaming message, saving to cache: ${agentMessage.type}`);
-            this._chatCache.addStructuredMessage(agentMessage.type, agentMessage.content, agentMessage.data || agentMessage.metadata);
+            // 旧的流式消息格式或非流式消息
+            if (agentMessage.type === 'streaming_start') {
+                this.streamingAccumulator = agentMessage.content || '';
+                this.isStreamingActive = true;
+            } else if (agentMessage.type === 'streaming_delta') {
+                if (this.isStreamingActive) {
+                    this.streamingAccumulator += agentMessage.content || '';
+                }
+            } else if (agentMessage.type === 'streaming_complete') {
+                if (this.isStreamingActive) {
+                    this._chatCache.addStructuredMessage('text', this.streamingAccumulator, {});
+                    this.isStreamingActive = false;
+                    this.streamingAccumulator = '';
+                }
+            } else {
+                // 非流式消息，正常保存到缓存
+                logger.debug(`🔧 [STREAMING] Non-streaming message, saving to cache: ${agentMessage.type}`);
+                this._chatCache.addStructuredMessage(agentMessage.type, agentMessage.content, agentMessage.data || agentMessage.metadata);
+            }
         }
 
         // 发送结构化消息到前端 - 支持新旧两种格式
@@ -307,6 +339,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 // 新的标准化消息格式
                 messageToSend.role = agentMessage.role;
                 messageToSend.type = agentMessage.type;
+                messageToSend.status = agentMessage.status; // 🔧 添加status字段
                 messageToSend.metadata = agentMessage.metadata;
             } else {
                 // 旧的消息格式
@@ -326,7 +359,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>BCoder Chat</title>
+            <title>BCoder Chat v4.0</title>
+            <!-- 🔧 FORCE WEBVIEW RELOAD - VERSION 4.0 - TIMESTAMP: ${Date.now()} -->
             <style>
                 body {
                     font-family: var(--vscode-font-family);
@@ -768,8 +802,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 const vscode = acquireVsCodeApi();
                 let isTyping = false;
 
+                // 🔧 强制标记 - 确认webview重新加载
+                console.log('🚀🚀🚀 [Frontend] WEBVIEW RELOADED - VERSION 5.0 - TIMESTAMP: ${Date.now()} 🚀🚀🚀');
+                alert('🚀 WEBVIEW LOADED - VERSION 5.0!');
+
                 // 通知扩展 webview 已准备就绪
                 window.addEventListener('load', function() {
+                    console.log('🚀 [Frontend] Window loaded - sending webviewReady');
                     setTimeout(() => {
                         vscode.postMessage({ type: 'webviewReady' });
                     }, 100);
@@ -829,21 +868,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 }
 
                 function renderMessage(msg) {
-                    // 简化版：根据消息类型选择渲染方式
+                    // 支持新的标准化消息格式
                     const messageType = msg.type || msg.messageType;
 
                     switch (messageType) {
+                        case 'think':
                         case 'thinking':
                             return renderThinkingMessage(msg);
                         case 'tool':
                             return renderToolMessage(msg);
+                        case 'text':
+                            return renderChatMessage({
+                                role: msg.role || 'assistant',
+                                content: msg.content,
+                                timestamp: msg.timestamp
+                            });
                         case 'error':
                             return renderErrorMessage(msg);
                         case 'clear':
                             // clear 消息在 handleAgentMessage 中特殊处理
                             return null;
                         default:
-                            // 默认渲染为聊天消息（text 类型）
+                            // 默认渲染为聊天消息
                             return renderChatMessage({
                                 role: msg.role || (msg.messageType === 'user_message' ? 'user' : 'assistant'),
                                 content: msg.content,
@@ -1129,6 +1175,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 window.addEventListener('message', event => {
                     const message = event.data;
 
+                    // 🔧 打印原始消息对象
+                    console.log('🔍🔍🔍 [FRONTEND RAW] ===== ORIGINAL MESSAGE =====');
+                    console.log('🔍🔍🔍 [FRONTEND RAW] FULL OBJECT:', JSON.stringify(message, null, 2));
+                    console.log('🔍🔍🔍 [FRONTEND RAW] ===== END =====');
+
                     // 发送前端调试信息到后端日志
                     vscode.postMessage({
                         type: 'frontendDebug',
@@ -1154,7 +1205,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                         hasData: !!message.data
                     });
 
-                    // 直接处理所有消息，不过滤
+                    // 🔧 修复：正确区分消息类型
                     if (message.type === 'showTyping') {
                         console.log('⏳ [Frontend] Showing typing indicator');
                         vscode.postMessage({
@@ -1162,12 +1213,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                             message: '⏳ [Frontend] Showing typing indicator'
                         });
                         showTypingIndicator();
-                    } else {
-                        // 所有其他消息都当作 agent 消息处理
-                        console.log('🤖 [Frontend] Processing message type:', message.type);
+                    } else if (message.type === 'userMessage') {
+                        // 🔧 修复：用户消息直接渲染，不通过 handleAgentMessage
+                        console.log('👤 [Frontend] Processing user message');
                         vscode.postMessage({
                             type: 'frontendDebug',
-                            message: '🤖 [Frontend] Processing message type: ' + message.type
+                            message: '👤 [Frontend] Processing user message'
+                        });
+                        handleUserMessage(message);
+                    } else {
+                        // Agent 消息通过 handleAgentMessage 处理
+                        console.log('🤖 [Frontend] Processing agent message type:', message.type);
+                        vscode.postMessage({
+                            type: 'frontendDebug',
+                            message: '🤖 [Frontend] Processing agent message type: ' + message.type
                         });
                         handleAgentMessage(message);
                     }
@@ -1194,36 +1253,62 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     container.scrollTop = container.scrollHeight;
                 }
 
+                // 🔧 新增：处理用户消息的函数
+                function handleUserMessage(message) {
+                    console.log('👤 [Frontend] Handling user message:', message.content);
+
+                    const container = document.getElementById('chatContainer');
+
+                    // Remove empty state if present
+                    const emptyState = container.querySelector('.empty-state');
+                    if (emptyState) {
+                        emptyState.remove();
+                    }
+
+                    // Create user message element
+                    const messageDiv = document.createElement('div');
+                    messageDiv.className = 'message user';
+                    messageDiv.innerHTML = \`
+                        <div class="message-content">\${message.content}</div>
+                        <div class="timestamp">\${new Date().toLocaleTimeString()}</div>
+                    \`;
+
+                    container.appendChild(messageDiv);
+                    container.scrollTop = container.scrollHeight;
+
+                    console.log('👤 [Frontend] User message rendered');
+                }
+
                 // 全局变量：当前流式消息元素
                 let currentStreamingElement = null;
 
                 function handleAgentMessage(message) {
+                    // 🔧 超详细的消息打印
+                    console.log('🔍🔍🔍 [Frontend] ===== MESSAGE DUMP START =====');
+                    console.log('📋 Type:', message.type);
+                    console.log('📋 Role:', message.role);
+                    console.log('📋 Content:', message.content);
+                    console.log('📋 Status:', message.status);
+                    console.log('📋 Timestamp:', message.timestamp);
+                    console.log('📋 Metadata:', message.metadata);
+                    console.log('📋 FULL OBJECT:', JSON.stringify(message, null, 2));
+                    console.log('🔍🔍🔍 [Frontend] ===== MESSAGE DUMP END =====');
+
                     // 发送详细调试信息到后端日志
                     vscode.postMessage({
                         type: 'frontendDebug',
-                        message: '🔍 [Frontend] handleAgentMessage called',
+                        message: '🔍 [Frontend] FULL MESSAGE DUMP',
                         data: {
-                            messageType: message.messageType,
                             type: message.type,
                             role: message.role,
-                            contentLength: message.content?.length || 0,
-                            content: message.content,  // 完整内容
-                            hasMetadata: !!message.metadata,
-                            hasData: !!message.data,
-                            fullMessage: message  // 完整消息对象
+                            status: message.status,
+                            content: message.content,
+                            fullMessage: message
                         }
                     });
 
-                    console.log('🔍 [Frontend] handleAgentMessage called with:', {
-                        messageType: message.messageType,
-                        type: message.type,
-                        role: message.role,
-                        contentLength: message.content?.length || 0,
-                        content: message.content,  // 显示完整内容
-                        hasMetadata: !!message.metadata,
-                        hasData: !!message.data,
-                        fullMessage: message  // 显示完整消息对象
-                    });
+                    // 🔧 添加明显的标记确认代码更新
+                    console.log('🚀 [Frontend] CODE UPDATED - VERSION 5.0!');
 
                     const container = document.getElementById('chatContainer');
                     // 修正：优先使用 messageType，因为 type 可能是 "agentMessage"
@@ -1245,19 +1330,37 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                         return;
                     }
 
-                    // Handle streaming messages
-                    if (messageType === 'streaming_start') {
-                        createStreamingMessage(message.content);
-                        return;
+                    // 🔧 修复：优先检查流式消息状态
+                    console.log('🔍 [Frontend] Checking streaming status:', message.status, 'messageType:', messageType);
+                    console.log('🔍 [Frontend] Full message object:', JSON.stringify(message, null, 2));
+
+                    // 检查是否为流式消息（优先检查status字段）
+                    if (message.status) {
+                        console.log('🌊 [Frontend] Detected streaming message with status:', message.status);
+
+                        if (message.status === 'start') {
+                            console.log('🌊 [Frontend] Starting streaming message');
+                            createStreamingMessage(message.content, message.type || 'text', message.role || 'assistant');
+                            return;
+                        }
+
+                        if (message.status === 'delta') {
+                            console.log('🌊 [Frontend] Appending delta content:', message.content);
+                            appendToStreamingMessage(message.content);
+                            return;
+                        }
+
+                        if (message.status === 'end') {
+                            console.log('🌊 [Frontend] Finalizing streaming message');
+                            finalizeStreamingMessage(message.content);
+                            return;
+                        }
                     }
 
-                    if (messageType === 'streaming_delta') {
-                        appendToStreamingMessage(message.content);
-                        return;
-                    }
-
-                    if (messageType === 'streaming_complete') {
-                        finalizeStreamingMessage();
+                    // 检查旧的流式消息格式
+                    if (messageType === 'streaming_start' || messageType === 'streaming_delta' || messageType === 'streaming_complete') {
+                        console.log('🌊 [Frontend] Detected old streaming format:', messageType);
+                        // 处理旧格式...
                         return;
                     }
 
@@ -1312,8 +1415,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     container.scrollTop = container.scrollHeight;
                 }
 
-                // 流式消息处理函数
-                function createStreamingMessage(initialContent) {
+                // 流式消息处理函数 - 支持不同类型的消息
+                function createStreamingMessage(initialContent, messageType = 'text', role = 'assistant') {
                     const container = document.getElementById('chatContainer');
 
                     // 移除空状态和打字指示器
@@ -1323,25 +1426,59 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     const typingIndicator = container.querySelector('.typing-indicator');
                     if (typingIndicator) typingIndicator.remove();
 
-                    // 创建流式消息容器
-                    const messageDiv = document.createElement('div');
-                    messageDiv.className = 'message assistant streaming';
-                    messageDiv.innerHTML = \`
-                        <div class="role-header">
-                            <span class="role-name">BCoder</span>
-                        </div>
-                        <div class="message-content" id="streaming-content">\${initialContent}</div>
-                        <div class="streaming-cursor">▊</div>
-                        <div class="timestamp">\${new Date().toLocaleTimeString()}</div>
-                    \`;
+                    // 🔧 修复：生成唯一ID避免冲突
+                    const streamingId = 'streaming-content-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+                    let messageDiv;
+
+                    // 根据消息类型创建不同的容器
+                    if (messageType === 'think') {
+                        // 思考消息 - 可收起的框
+                        messageDiv = document.createElement('div');
+                        messageDiv.className = 'thinking-box streaming';
+                        messageDiv.innerHTML = \`
+                            <div class="thinking-header">
+                                💭 思考 <span style="font-size: 10px;">▼</span>
+                            </div>
+                            <div class="thinking-content expanded">
+                                <div id="\${streamingId}">\${initialContent}</div>
+                                <div class="streaming-cursor">▊</div>
+                            </div>
+                        \`;
+                    } else if (messageType === 'tool') {
+                        // 工具消息 - 工具执行框
+                        messageDiv = document.createElement('div');
+                        messageDiv.className = 'tool-execution streaming';
+                        messageDiv.innerHTML = \`
+                            <div class="tool-header">
+                                ⚡ 工具执行
+                            </div>
+                            <div class="tool-content">
+                                <div id="\${streamingId}">\${initialContent}</div>
+                                <div class="streaming-cursor">▊</div>
+                            </div>
+                        \`;
+                    } else {
+                        // 普通文本消息
+                        messageDiv = document.createElement('div');
+                        messageDiv.className = 'message assistant streaming';
+                        const roleName = getRoleName(role);
+                        messageDiv.innerHTML = \`
+                            <div class="role-header">
+                                <span class="role-name">\${roleName}</span>
+                            </div>
+                            <div class="message-content" id="\${streamingId}">\${initialContent}</div>
+                            <div class="streaming-cursor">▊</div>
+                            <div class="timestamp">\${new Date().toLocaleTimeString()}</div>
+                        \`;
+                    }
 
                     container.appendChild(messageDiv);
-                    currentStreamingElement = messageDiv.querySelector('#streaming-content');
+                    currentStreamingElement = messageDiv.querySelector('#' + streamingId);
 
                     // 滚动到底部
                     container.scrollTop = container.scrollHeight;
 
-                    console.log('🌊 [Frontend] Created streaming message with initial content:', initialContent);
+                    console.log('🌊 [Frontend] Created streaming message:', messageType, 'with unique ID:', streamingId);
                 }
 
                 function appendToStreamingMessage(deltaContent) {
@@ -1358,14 +1495,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     }
                 }
 
-                function finalizeStreamingMessage() {
+                function finalizeStreamingMessage(finalContent) {
                     if (currentStreamingElement) {
+                        console.log('🔧 [Frontend] Finalizing with content:', finalContent);
+                        console.log('🔧 [Frontend] Current element content before finalize:', currentStreamingElement.textContent);
+
+                        // 🔧 修复：如果有最终内容且不为空，才更新内容
+                        if (finalContent !== undefined && finalContent !== '') {
+                            currentStreamingElement.textContent = finalContent;
+                            console.log('🔧 [Frontend] Updated to final content:', finalContent);
+                        } else {
+                            console.log('🔧 [Frontend] Keeping existing content, final content is empty or undefined');
+                        }
+
                         // 移除光标
                         const cursor = currentStreamingElement.parentElement.querySelector('.streaming-cursor');
                         if (cursor) cursor.remove();
 
                         // 移除 streaming 类
-                        const messageDiv = currentStreamingElement.closest('.message');
+                        const messageDiv = currentStreamingElement.closest('.message, .thinking-box, .tool-execution');
                         if (messageDiv) {
                             messageDiv.classList.remove('streaming');
                         }

@@ -2,21 +2,32 @@
  * 标准化消息格式 - 支持 Multi-Agent 架构
  */
 
+/**
+ * 消息状态 - 用于流式处理
+ */
+export type MessageStatus = 'start' | 'delta' | 'end';
+
 export interface StandardMessage {
-    /** 角色名称 - 用于显示发言人 */
+    /** 角色名称 - 用于显示发言人（支持multi-agent） */
     role: string;
-    
+
     /** 消息类型 - 用于确定渲染样式和行为 */
     type: string;
-    
+
     /** 消息内容 - 主要显示内容 */
     content: string;
-    
+
+    /** 消息状态 - 用于流式处理 */
+    status: MessageStatus;
+
     /** 时间戳 */
     timestamp: Date;
-    
+
     /** 可选元数据 - 用于扩展信息 */
     metadata?: MessageMetadata;
+
+    /** 消息ID - 用于追踪流式消息 */
+    id?: string;
 }
 
 export interface MessageMetadata {
@@ -53,28 +64,20 @@ export enum MessageRole {
 }
 
 /**
- * 预定义的消息类型 - 简化版（仅保留核心类型）
+ * 预定义的消息类型 - 核心类型
  */
 export enum MessageType {
-    // 1. 基础对话
-    TEXT = 'text',           // 普通文本消息（用户输入 + 助手回复）
+    /** 思考过程 - 可收起的思考框 */
+    THINK = 'think',
 
-    // 2. 工具执行
-    TOOL = 'tool',           // 工具相关消息（开始/进度/结果/错误）
+    /** 工具执行 - 工具调用和结果 */
+    TOOL = 'tool',
 
-    // 3. 思考过程
-    THINKING = 'thinking',   // Agent 思考过程
+    /** 文本回复 - 普通对话内容 */
+    TEXT = 'text',
 
-    // 4. 流式输出
-    STREAMING_START = 'streaming_start',       // 开始流式输出
-    STREAMING_DELTA = 'streaming_delta',       // 流式增量内容
-    STREAMING_COMPLETE = 'streaming_complete', // 流式输出完成
-
-    // 5. 错误信息
-    ERROR = 'error',         // 错误消息
-
-    // 6. 系统控制
-    CLEAR = 'clear'          // 清除聊天
+    /** 错误信息 */
+    ERROR = 'error'
 }
 
 /**
@@ -82,7 +85,8 @@ export enum MessageType {
  */
 export class MessageBuilder {
     private message: Partial<StandardMessage> = {
-        timestamp: new Date()
+        timestamp: new Date(),
+        status: 'end' // 默认为完整消息
     };
 
     static create(): MessageBuilder {
@@ -101,6 +105,16 @@ export class MessageBuilder {
 
     content(content: string): MessageBuilder {
         this.message.content = content;
+        return this;
+    }
+
+    status(status: MessageStatus): MessageBuilder {
+        this.message.status = status;
+        return this;
+    }
+
+    id(id: string): MessageBuilder {
+        this.message.id = id;
         return this;
     }
 
@@ -136,89 +150,79 @@ export class MessageBuilder {
     }
 
     build(): StandardMessage {
-        if (!this.message.role || !this.message.type || this.message.content === undefined) {
-            throw new Error('Message must have role, type, and content');
+        if (!this.message.role || !this.message.type || this.message.content === undefined || !this.message.status) {
+            throw new Error('Message must have role, type, content, and status');
         }
         return this.message as StandardMessage;
     }
 }
 
 /**
- * 消息工厂 - 快速创建常用消息类型（简化版）
+ * 消息工厂 - 快速创建常用消息类型
  */
 export class MessageFactory {
-    static userMessage(content: string): StandardMessage {
+    private static generateId(): string {
+        return `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    }
+
+    static userMessage(content: string, role: string = MessageRole.USER): StandardMessage {
         return MessageBuilder.create()
-            .role(MessageRole.USER)
+            .role(role)
             .type(MessageType.TEXT)
             .content(content)
+            .status('end')
             .build();
     }
 
-    static assistantMessage(content: string): StandardMessage {
+    static textMessage(content: string, status: MessageStatus = 'end', role: string = MessageRole.ASSISTANT): StandardMessage {
         return MessageBuilder.create()
-            .role(MessageRole.ASSISTANT)
+            .role(role)
             .type(MessageType.TEXT)
             .content(content)
+            .status(status)
+            .id(this.generateId())
             .build();
     }
 
-    static toolMessage(toolName: string, content: string, success?: boolean, data?: any): StandardMessage {
+    static thinkMessage(content: string, status: MessageStatus = 'end', role: string = MessageRole.ASSISTANT): StandardMessage {
         return MessageBuilder.create()
-            .role(MessageRole.SYSTEM)
+            .role(role)
+            .type(MessageType.THINK)
+            .content(content)
+            .status(status)
+            .id(this.generateId())
+            .build();
+    }
+
+    static toolMessage(
+        content: string,
+        status: MessageStatus = 'end',
+        role: string = MessageRole.ASSISTANT,
+        toolName?: string,
+        success?: boolean,
+        data?: any
+    ): StandardMessage {
+        const builder = MessageBuilder.create()
+            .role(role)
             .type(MessageType.TOOL)
             .content(content)
-            .toolInfo(toolName, success, data)
-            .build();
+            .status(status)
+            .id(this.generateId());
+
+        if (toolName !== undefined) {
+            builder.toolInfo(toolName, success, data);
+        }
+
+        return builder.build();
     }
 
-    static thinking(thought: string): StandardMessage {
+    static errorMessage(content: string, role: string = MessageRole.ASSISTANT, error?: string): StandardMessage {
         return MessageBuilder.create()
-            .role(MessageRole.ASSISTANT)
-            .type(MessageType.THINKING)
-            .content(thought)
-            .build();
-    }
-
-    static error(error: string): StandardMessage {
-        return MessageBuilder.create()
-            .role(MessageRole.SYSTEM)
+            .role(role)
             .type(MessageType.ERROR)
-            .content(error)
-            .error(error)
-            .build();
-    }
-
-    static clear(): StandardMessage {
-        return MessageBuilder.create()
-            .role(MessageRole.SYSTEM)
-            .type(MessageType.CLEAR)
-            .content('')
-            .build();
-    }
-
-    // 流式消息工厂方法
-    static streamingStart(content: string): StandardMessage {
-        return MessageBuilder.create()
-            .role(MessageRole.ASSISTANT)
-            .type(MessageType.STREAMING_START)
             .content(content)
-            .build();
-    }
-
-    static streamingDelta(content: string): StandardMessage {
-        return MessageBuilder.create()
-            .role(MessageRole.ASSISTANT)
-            .type(MessageType.STREAMING_DELTA)
-            .content(content)
-            .build();
-    }
-
-    static streamingComplete(): StandardMessage {
-        return MessageBuilder.create()
-            .role(MessageRole.ASSISTANT)
-            .type(MessageType.STREAMING_COMPLETE)
-            .content('')
+            .status('end')
+            .error(error || content)
             .build();
     }
 }

@@ -207,4 +207,4 @@ export class AgentSystem {
 // 导出新架构的接口
 export * from './agentInterface';
 export * from './agentManager';
-export * from './bcoderAgent';
+export * from './bcoderReactAgent';

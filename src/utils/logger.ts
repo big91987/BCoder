@@ -44,7 +44,9 @@ export class Logger {
             if (!fs.existsSync(logDir)) {
                 fs.mkdirSync(logDir, { recursive: true });
             }
-            this.writeToFile(`\n=== BCoder Extension Started at ${new Date().toISOString()} ===\n`);
+            // 🔧 修改：每次重启都清空日志文件
+            this.clearLogFile();
+            this.writeToFile(`=== BCoder Extension Started at ${new Date().toISOString()} ===\n`);
         } catch (error) {
             console.error('Logger init failed:', error);
         }
@@ -60,6 +62,14 @@ export class Logger {
     private writeToFile(message: string): void {
         try {
             fs.appendFileSync(this.logPath, message);
+        } catch (error) {
+            // Ignore file write errors
+        }
+    }
+
+    private clearLogFile(): void {
+        try {
+            fs.writeFileSync(this.logPath, '');
         } catch (error) {
             // Ignore file write errors
         }

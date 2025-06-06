@@ -1,5 +1,5 @@
 import { IAgent, IAgentFactory, IAgentManager, AgentConfig } from './agentInterface';
-import { BCoderAgent } from './bcoderAgent';
+import { BCoderReactAgent } from './bcoderReactAgent';
 import { logger } from '../utils/logger';
 
 /**
@@ -13,7 +13,7 @@ export class BCoderAgentFactory implements IAgentFactory {
     }
 
     async createAgent(config?: Record<string, any>): Promise<IAgent> {
-        const agent = new BCoderAgent();
+        const agent = new BCoderReactAgent();
 
         // 调试：检查传递给 Agent 的 context
         const finalContext = { ...this.context, ...config };
@@ -93,9 +93,9 @@ export class AgentManager implements IAgentManager {
                 agents.push({
                     type,
                     config: {
-                        name: 'BCoder Agent',
+                        name: 'BCoder ReAct Agent',
                         version: '1.0.0',
-                        description: 'BCoder 默认智能代码助手，基于 OPAR 循环执行任务',
+                        description: 'BCoder ReAct智能代码助手，基于事件驱动的流式解析器',
                         capabilities: [
                             'file_operations',
                             'code_analysis',
@@ -144,7 +144,7 @@ export class AgentManager implements IAgentManager {
      */
     private getAgentType(agent: IAgent): string {
         // 简单的类型推断，实际实现中可能需要更复杂的逻辑
-        if (agent instanceof BCoderAgent) {
+        if (agent instanceof BCoderReactAgent) {
             return 'bcoder';
         }
         return 'unknown';
