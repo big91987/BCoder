@@ -215,15 +215,48 @@ export async function activate(context: vscode.ExtensionContext) {
 
     const clearCacheCommand = vscode.commands.registerCommand('bcoder.clearCache', async () => {
         const choice = await vscode.window.showWarningMessage(
-            '确定要清空所有聊天记录吗？此操作不可撤销。',
-            '清空', '取消'
+            '确定要清空所有BCoder缓存吗？包括聊天记录、设置状态等。此操作不可撤销。',
+            '清空所有缓存', '取消'
         );
 
-        if (choice === '清空') {
-            const { ChatCache } = require('./utils/chatCache');
-            const cache = ChatCache.getInstance();
-            cache.clearAllCache();
-            vscode.window.showInformationMessage('聊天记录已清空');
+        if (choice === '清空所有缓存') {
+            try {
+                logger.info('🗑️ Starting complete cache cleanup...');
+
+                // 1. 清除聊天缓存
+                const { ChatCache } = require('./utils/chatCache');
+                const cache = ChatCache.getInstance();
+                cache.clearAllCache();
+                logger.info('🗑️ Chat cache cleared');
+
+                // 2. 清除全局状态
+                const globalKeys = context.globalState.keys();
+                for (const key of globalKeys) {
+                    if (key.startsWith('bcoder') || key.includes('chat') || key.includes('session')) {
+                        await context.globalState.update(key, undefined);
+                        logger.info(`🗑️ Cleared global state: ${key}`);
+                    }
+                }
+
+                // 3. 清除工作区状态
+                const workspaceKeys = context.workspaceState.keys();
+                for (const key of workspaceKeys) {
+                    if (key.startsWith('bcoder') || key.includes('chat') || key.includes('session')) {
+                        await context.workspaceState.update(key, undefined);
+                        logger.info(`🗑️ Cleared workspace state: ${key}`);
+                    }
+                }
+
+                // 4. 清除日志
+                logger.clearLogs();
+                logger.info('🗑️ Logs cleared');
+
+                logger.info('✅ Complete cache cleanup finished');
+                vscode.window.showInformationMessage('所有BCoder缓存已清空，建议重启VSCode以确保完全生效');
+            } catch (error) {
+                logger.error('❌ Failed to clear cache:', error);
+                vscode.window.showErrorMessage(`清除缓存失败: ${error instanceof Error ? error.message : 'Unknown error'}`);
+            }
         }
     });
 

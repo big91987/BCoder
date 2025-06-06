@@ -132,21 +132,25 @@ class SingleTokenReactParser extends ReactAgentParser {
     private parseFullResponse(response: string): Partial<ParserState> {
         const newState: Partial<ParserState> = {};
 
-        // 解析 THOUGHT
-        const thoughtMatch = response.match(/THOUGHT:\s*(.+?)(?=\s*(?:ACTION|ANSWER)|$)/s);
+        // 🔧 修复：更精确的解析，处理token分割问题
+
+        // 解析 THOUGHT - 支持token分割的THOUGHT和ANSWER
+        // 匹配THOUGHT:后的内容，直到遇到ACTION、ANSWER或各种分割形式
+        const thoughtMatch = response.match(/THOUGHT:\s*(.+?)(?=\s*(?:ACTION|ANSWER|AN\s*SW\s*ER|FINAL_AN\s*SW\s*ER|FINAL_ANSWER)|$)/s);
         if (thoughtMatch) {
             newState.thoughtContent = thoughtMatch[1].trim();
-            newState.isThoughtComplete = /THOUGHT:\s*.+?\s*(?:ACTION|ANSWER)/.test(response);
+            // 检查是否有后续的ACTION或ANSWER标记（包括分割形式）
+            newState.isThoughtComplete = /THOUGHT:\s*.+?\s*(?:ACTION|ANSWER|AN\s*SW\s*ER|FINAL_AN\s*SW\s*ER|FINAL_ANSWER)/.test(response);
         }
 
         // 解析 ACTION
-        const actionMatch = response.match(/ACTION:\s*(.+?)(?=\s*(?:ACTION_INPUT|THOUGHT|ANSWER)|$)/s);
+        const actionMatch = response.match(/ACTION:\s*(.+?)(?=\s*(?:ACTION_INPUT|THOUGHT|AN\s*SW\s*ER|ANSWER)|$)/s);
         if (actionMatch) {
             newState.actionName = actionMatch[1].trim();
         }
 
         // 解析 ACTION_INPUT
-        const actionInputMatch = response.match(/ACTION_INPUT:\s*(.+?)(?=\s*(?:THOUGHT|ANSWER)|$)/s);
+        const actionInputMatch = response.match(/ACTION_INPUT:\s*(.+?)(?=\s*(?:THOUGHT|AN\s*SW\s*ER|ANSWER)|$)/s);
         if (actionInputMatch) {
             try {
                 newState.actionInput = JSON.parse(actionInputMatch[1].trim());
@@ -157,11 +161,13 @@ class SingleTokenReactParser extends ReactAgentParser {
             }
         }
 
-        // 解析 ANSWER
-        const answerMatch = response.match(/ANSWER:\s*(.+?)$/s);
+        // 🔧 修复：解析 ANSWER - 支持流式处理和token分割
+        // 匹配 "ANSWER:" 或 "AN SW ER:" 或其他分割形式，不要求到达末尾
+        const answerMatch = response.match(/(?:ANSWER|AN\s*SW\s*ER):\s*(.+?)(?=\s*(?:THOUGHT|ACTION)|$)/s);
         if (answerMatch) {
             newState.answerContent = answerMatch[1].trim();
-            newState.isAnswerComplete = true; // 到达末尾就认为完整
+            // 🔧 只有在响应真正结束时才认为完整，而不是匹配到就认为完整
+            newState.isAnswerComplete = /(?:ANSWER|AN\s*SW\s*ER):\s*.+$/s.test(response);
         }
 
         return newState;
@@ -558,11 +564,12 @@ ANSWER: [完整的最终答案，可以多行]
 
 重要规则：
 1. 每个字段必须独占一行，以字段名开头
-2. 使用 ANSWER: 而不是 FINAL_ANSWER:（避免token分割）
-3. ANSWER 可以包含多行内容
-4. 不要使用JSON格式或其他格式
-5. 严格按照上述格式，不要添加额外的标记
-6. 记住之前的对话内容，保持上下文连贯性
+2. 🚨 必须使用 ANSWER: 而不是 FINAL_ANSWER:（避免token分割问题）
+3. 🚨 绝对不要使用 FINAL_ANSWER:，只能使用 ANSWER:
+4. ANSWER 可以包含多行内容
+5. 不要使用JSON格式或其他格式
+6. 严格按照上述格式，不要添加额外的标记
+7. 记住之前的对话内容，保持上下文连贯性
 
 示例：
 THOUGHT: 用户询问我的身份，我可以直接回答，不需要使用任何工具
@@ -773,6 +780,14 @@ ANSWER: 我是一个智能代码助手，可以帮助你处理与文件操作相
 
         const result = finalAnswer || '任务执行完成，但未获得明确答案。';
         logger.info(`📤 Agent 最终返回结果: ${result.substring(0, 100)}${result.length > 100 ? '...' : ''}`);
+
+        // 🔧 修复：发送text消息的end事件，确保消息被保存到缓存
+        if (finalAnswer) {
+            const textEndMsg = MessageFactory.textMessage(finalAnswer, 'end', 'BCoder');
+            callbacks.onMessage(textEndMsg);
+            logger.info(`🔧 [END] Sent text end event for final answer`);
+        }
+
         return result;
     }
 

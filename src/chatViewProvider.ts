@@ -59,20 +59,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     this.clearChat();
                     break;
                 case 'webviewReady':
-                    // 🔧 WebView准备就绪，触发恢复（防重复恢复）
+                    // 🔧 WebView准备就绪，总是尝试恢复（因为WebView可能被重新创建）
                     logger.info('🎯 Webview ready event received');
-                    if (!this.hasRestored) {
-                        logger.info('🔄 Starting message restore...');
-                        const cachedMessages = this._chatCache.getCurrentMessages();
-                        if (cachedMessages.length > 0) {
-                            this.hasRestored = true; // 标记为已恢复
-                            this.restoreMessagesFromCache(cachedMessages);
-                        } else {
-                            logger.info('📭 No messages to restore');
-                            this.hasRestored = true; // 即使没有消息也标记为已恢复
-                        }
+                    logger.info(`🔧 [RESTORE] Current hasRestored flag: ${this.hasRestored}`);
+
+                    // 🔧 修复：总是重置恢复状态，因为WebView可能被重新创建
+                    this.hasRestored = false;
+
+                    logger.info('🔄 Starting message restore...');
+                    const cachedMessages = this._chatCache.getCurrentMessages();
+                    if (cachedMessages.length > 0) {
+                        this.hasRestored = true; // 标记为已恢复
+                        this.restoreMessagesFromCache(cachedMessages);
                     } else {
-                        logger.info('⏭️ Skipping restore - already restored');
+                        logger.info('📭 No messages to restore');
+                        this.hasRestored = true; // 即使没有消息也标记为已恢复
                     }
                     break;
                 case 'frontendDebug':
@@ -88,7 +89,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     logger.info('🔧 Force restore requested');
                     {
                         const cachedMessages = this._chatCache.getCurrentMessages();
-                        this.restoreMessagesFromCache(cachedMessages);
+                        logger.info(`🔧 [FORCE RESTORE] Found ${cachedMessages.length} cached messages`);
+                        logger.info(`🔧 [FORCE RESTORE] hasRestored flag: ${this.hasRestored}`);
+
+                        // 重置恢复标志，强制恢复
+                        this.hasRestored = false;
+
+                        if (cachedMessages.length > 0) {
+                            this.restoreMessagesFromCache(cachedMessages);
+                        } else {
+                            logger.info('🔧 [FORCE RESTORE] No messages in cache to restore');
+                        }
                     }
                     break;
             }
@@ -100,6 +111,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
      */
     private restoreMessagesFromCache(messages: any[]) {
         logger.info(`🔄 Restoring ${messages.length} messages from cache`);
+
+        // 🔧 添加详细的缓存消息调试
+        logger.info('🔍🔍🔍 [RESTORE] ===== CACHE MESSAGES DUMP START =====');
+        logger.info(`🔍 [RESTORE] Total messages in cache: ${messages.length}`);
+
+        messages.forEach((msg, index) => {
+            logger.info(`🔍 [RESTORE] Message ${index + 1}/${messages.length}:`);
+            logger.info(`  📝 ID: ${msg.id}`);
+            logger.info(`  👤 Role: ${msg.role}`);
+            logger.info(`  🏷️ MessageType: ${msg.messageType || 'undefined'}`);
+            logger.info(`  📏 Content Length: ${msg.content?.length || 0}`);
+            logger.info(`  ⏰ Timestamp: ${msg.timestamp}`);
+            logger.info(`  📄 Content Preview: "${msg.content?.substring(0, 200) || 'NO_CONTENT'}"`);
+            logger.info(`  🗂️ Data: ${JSON.stringify(msg.data || {}, null, 2)}`);
+            logger.info(`  🔍 Full Message: ${JSON.stringify(msg, null, 2)}`);
+            logger.info('  ─────────────────────────────────────────────────────');
+        });
+
+        logger.info('🔍🔍🔍 [RESTORE] ===== CACHE MESSAGES DUMP END =====');
 
         if (!this._view) {
             logger.warn('⚠️ No webview available for restore');
@@ -117,43 +147,85 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             const msg = messages[messageIndex];
             messageIndex++;
 
-            // 🔧 修复：跳过空消息和所有不应该恢复的消息类型
-            if (!msg.content?.trim() ||
-                // 旧的流式消息类型
-                msg.messageType === 'streaming_start' ||
-                msg.messageType === 'streaming_delta' ||
-                msg.messageType === 'streaming_complete' ||
-                // 新的标准化消息类型 - 只恢复完整的消息，不恢复流式片段
-                msg.messageType === 'think' ||  // 思考消息通常是流式的，不恢复
-                msg.messageType === 'progress' || // 进度消息不恢复
-                msg.messageType === 'tool_start' || // 工具开始消息不恢复
-                msg.messageType === 'tool_error'   // 工具错误消息不恢复
-            ) {
-                logger.debug(`🔧 [RESTORE] Skipping message: type=${msg.messageType}, content="${msg.content?.substring(0, 50)}"`);
+            logger.info(`🔧 [RESTORE] Processing message ${messageIndex}/${messages.length}:`, {
+                messageType: msg.messageType,
+                role: msg.role,
+                contentLength: msg.content?.length || 0,
+                contentPreview: msg.content?.substring(0, 50) || 'NO_CONTENT'
+            });
+
+            // 🔧 修复：只跳过空消息和不需要恢复的消息类型
+            if (!msg.content?.trim()) {
+                logger.info(`🔧 [RESTORE] ⏭️ SKIPPING empty message: type=${msg.messageType}`);
                 setTimeout(sendNextMessage, 10);
                 return;
             }
 
-            // 发送消息到前端
-            if (msg.messageType) {
-                // 结构化消息
-                this._view!.webview.postMessage({
-                    type: 'agentMessage',
-                    messageType: msg.messageType,
-                    content: msg.content,
-                    data: msg.data || {},
-                    timestamp: msg.timestamp
-                });
-            } else {
-                // 普通消息
-                this._view!.webview.postMessage({
-                    type: 'agentMessage',
-                    messageType: msg.role === 'user' ? 'user_message' : 'assistant_message',
-                    content: msg.content,
-                    data: {},
-                    timestamp: msg.timestamp
-                });
+            // 🔧 跳过流式片段和临时消息，但保留完整的消息
+            const skipMessageTypes = [
+                'streaming_start',    // 旧的流式开始片段
+                'streaming_delta',    // 旧的流式增量片段
+                'streaming_complete', // 旧的流式完成片段
+                'progress',          // 进度消息
+                'tool_start',        // 工具开始消息
+                'tool_error'         // 工具错误消息
+            ];
+
+            if (skipMessageTypes.includes(msg.messageType)) {
+                logger.info(`🔧 [RESTORE] ⏭️ SKIPPING ${msg.messageType} message: "${msg.content?.substring(0, 50)}"`);
+                setTimeout(sendNextMessage, 10);
+                return;
             }
+
+            // 🔧 明确允许的消息类型
+            const allowedMessageTypes = [
+                'user_message',      // 用户消息
+                'text',             // 助手文本回复
+                'think',            // 思考过程
+                'tool_call',        // 工具调用
+                'tool_result',      // 工具结果
+                'error'             // 错误消息
+            ];
+
+            if (!allowedMessageTypes.includes(msg.messageType)) {
+                logger.info(`🔧 [RESTORE] ⚠️ UNKNOWN message type: ${msg.messageType}, content: "${msg.content?.substring(0, 50)}" - ALLOWING`);
+                // 不跳过未知类型，让它通过，以防遗漏重要消息
+            }
+
+            // 🔧 修复：发送消息到前端，使用新的标准化格式
+            let messageToSend;
+            if (msg.messageType) {
+                // 结构化消息 - 转换为新格式
+                messageToSend = {
+                    type: 'agentMessage',
+                    role: msg.role || 'assistant',     // 添加role字段
+                    messageType: msg.messageType,       // 保持messageType用于前端兼容
+                    content: msg.content,
+                    metadata: msg.data || {},           // 使用metadata而不是data
+                    timestamp: msg.timestamp
+                };
+            } else {
+                // 普通消息 - 转换为新格式
+                messageToSend = {
+                    type: 'agentMessage',
+                    role: msg.role || (msg.role === 'user' ? 'user' : 'assistant'),
+                    messageType: 'text',                // 普通消息都是text类型
+                    content: msg.content,
+                    metadata: {},
+                    timestamp: msg.timestamp
+                };
+            }
+
+            logger.info(`🔧 [RESTORE] 📤 SENDING to frontend:`, {
+                type: messageToSend.type,
+                role: messageToSend.role,
+                messageType: messageToSend.messageType,
+                contentLength: messageToSend.content?.length || 0,
+                contentPreview: messageToSend.content?.substring(0, 50) || 'NO_CONTENT',
+                fullMessage: JSON.stringify(messageToSend, null, 2)
+            });
+
+            this._view!.webview.postMessage(messageToSend);
 
             // 延迟发送下一条消息
             setTimeout(sendNextMessage, 50);
@@ -188,8 +260,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             // Show typing indicator
             this.showTypingIndicator();
 
-            // Create assistant message in cache
-            const assistantMessage = this._chatCache.addMessage('assistant', '');
+            // 🔧 修复：不再创建空助手消息，流式消息会通过handleAgentMessage自动保存
 
             // Get AI response with structured message handling
             const response = await this._chatProvider.askQuestionWithStructuredMessages(message, (agentMessage: any) => {
@@ -197,14 +268,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 this.handleAgentMessage(agentMessage);
             });
 
-            // 使用结构化消息时，不需要更新缓存和UI，因为消息已经通过 handleAgentMessage 实时发送到前端
-            // 只需要更新历史记录用于下次对话
-            const messages = this._chatCache.getCurrentMessages();
-            const lastMessage = messages[messages.length - 1];
-            if (lastMessage && lastMessage.role === 'assistant') {
-                lastMessage.content = response;
-                // addMessage 方法会自动保存，这里不需要手动保存
-            }
+            // 🔧 修复：删除错误的缓存更新逻辑
+            // 流式消息已经通过handleAgentMessage正确保存到缓存，不需要额外处理
 
         } catch (error) {
             logger.error('Error in chat:', error);
@@ -258,9 +323,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         logger.info('✅ Chat cleared completely');
     }
 
-    // 流式消息累积器
-    private streamingAccumulator: string = '';
-    private isStreamingActive: boolean = false;
+    // 🔧 修复：为每个消息类型使用独立的累积器
+    private streamingAccumulators: Map<string, string> = new Map();
+    private activeStreamingTypes: Set<string> = new Set();
 
     private handleAgentMessage(agentMessage: any) {
         // 🔧 打印原始消息对象
@@ -275,54 +340,75 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // 🔧 新的标准化流式消息处理逻辑
         logger.debug(`🔧 [STREAMING] Processing message: type=${agentMessage.type}, status=${agentMessage.status}`);
 
-        // 检查是否为新的标准化消息格式
+        // 🔧 新的缓存策略：只缓存完整消息，不缓存流式片段
         if (agentMessage.status) {
             // 新的标准化消息格式：start/delta/end
             if (agentMessage.status === 'start') {
-                // 开始流式消息，重置累积器
+                // 开始流式消息，初始化该类型的累积器
                 logger.debug(`🔧 [STREAMING] Starting ${agentMessage.type} stream`);
-                this.streamingAccumulator = agentMessage.content || '';
-                this.isStreamingActive = true;
-                // 不保存到缓存，只发送到前端
+                this.streamingAccumulators.set(agentMessage.type, agentMessage.content || '');
+                this.activeStreamingTypes.add(agentMessage.type);
+                // ❌ 不保存到缓存 - 只是流式开始
             } else if (agentMessage.status === 'delta') {
                 // 累积流式内容
                 logger.debug(`🔧 [STREAMING] Delta for ${agentMessage.type}: "${agentMessage.content}"`);
-                if (this.isStreamingActive) {
-                    this.streamingAccumulator += agentMessage.content || '';
+                if (this.activeStreamingTypes.has(agentMessage.type)) {
+                    const current = this.streamingAccumulators.get(agentMessage.type) || '';
+                    this.streamingAccumulators.set(agentMessage.type, current + (agentMessage.content || ''));
                 }
-                // 不保存到缓存，只发送到前端
+                // ❌ 不保存到缓存 - 只是流式片段
             } else if (agentMessage.status === 'end') {
                 // 流式完成，保存完整内容到缓存
                 logger.debug(`🔧 [STREAMING] Ending ${agentMessage.type} stream, final content: "${agentMessage.content}"`);
-                if (this.isStreamingActive) {
-                    // 使用end消息的完整内容，而不是累积的内容
-                    const finalContent = agentMessage.content || this.streamingAccumulator;
-                    this._chatCache.addStructuredMessage(agentMessage.type, finalContent, agentMessage.metadata || {});
-                    logger.debug(`🔧 [STREAMING] Saved complete ${agentMessage.type} message to cache`);
-                    this.isStreamingActive = false;
-                    this.streamingAccumulator = '';
+                if (this.activeStreamingTypes.has(agentMessage.type)) {
+                    // ✅ 只在这里保存完整消息到缓存
+                    const accumulatedContent = this.streamingAccumulators.get(agentMessage.type) || '';
+                    const finalContent = agentMessage.content || accumulatedContent;
+
+                    logger.info(`🔧 [CACHE] 💾 SAVING COMPLETE MESSAGE:`);
+                    logger.info(`  🏷️ Type: ${agentMessage.type}`);
+                    logger.info(`  📏 Content Length: ${finalContent.length}`);
+                    logger.info(`  📄 Content: "${finalContent}"`);
+                    logger.info(`  🗂️ Metadata: ${JSON.stringify(agentMessage.metadata || {}, null, 2)}`);
+
+                    const savedMessage = this._chatCache.addStructuredMessage(agentMessage.type, finalContent, agentMessage.metadata || {});
+
+                    logger.info(`🔧 [CACHE] ✅ SAVED MESSAGE WITH ID: ${savedMessage.id}`);
+                    logger.info(`🔧 [CACHE] 📊 Total messages in cache now: ${this._chatCache.getCurrentMessages().length}`);
+
+                    // 清理该类型的累积器
+                    this.activeStreamingTypes.delete(agentMessage.type);
+                    this.streamingAccumulators.delete(agentMessage.type);
                 }
                 // 继续发送到前端
             }
         } else {
-            // 旧的流式消息格式或非流式消息
+            // 旧的流式消息格式
             if (agentMessage.type === 'streaming_start') {
-                this.streamingAccumulator = agentMessage.content || '';
-                this.isStreamingActive = true;
+                this.streamingAccumulators.set('text', agentMessage.content || '');
+                this.activeStreamingTypes.add('text');
+                // ❌ 不保存到缓存 - 只是流式开始
             } else if (agentMessage.type === 'streaming_delta') {
-                if (this.isStreamingActive) {
-                    this.streamingAccumulator += agentMessage.content || '';
+                if (this.activeStreamingTypes.has('text')) {
+                    const current = this.streamingAccumulators.get('text') || '';
+                    this.streamingAccumulators.set('text', current + (agentMessage.content || ''));
                 }
+                // ❌ 不保存到缓存 - 只是流式片段
             } else if (agentMessage.type === 'streaming_complete') {
-                if (this.isStreamingActive) {
-                    this._chatCache.addStructuredMessage('text', this.streamingAccumulator, {});
-                    this.isStreamingActive = false;
-                    this.streamingAccumulator = '';
+                if (this.activeStreamingTypes.has('text')) {
+                    // ✅ 只在这里保存完整消息到缓存
+                    const finalContent = this.streamingAccumulators.get('text') || '';
+                    logger.debug(`🔧 [CACHE] Saving complete text message: "${finalContent.substring(0, 100)}..."`);
+                    this._chatCache.addStructuredMessage('text', finalContent, {});
+                    logger.debug(`🔧 [CACHE] ✅ Saved complete text message to cache`);
+                    this.activeStreamingTypes.delete('text');
+                    this.streamingAccumulators.delete('text');
                 }
             } else {
-                // 非流式消息，正常保存到缓存
-                logger.debug(`🔧 [STREAMING] Non-streaming message, saving to cache: ${agentMessage.type}`);
+                // 非流式消息，直接保存到缓存
+                logger.debug(`🔧 [CACHE] Saving non-streaming message: ${agentMessage.type}`);
                 this._chatCache.addStructuredMessage(agentMessage.type, agentMessage.content, agentMessage.data || agentMessage.metadata);
+                logger.debug(`🔧 [CACHE] ✅ Saved ${agentMessage.type} message to cache`);
             }
         }
 
@@ -334,18 +420,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 timestamp: agentMessage.timestamp
             };
 
-            // 检查是否为新的标准化消息格式
-            if (agentMessage.role && agentMessage.type) {
-                // 新的标准化消息格式
-                messageToSend.role = agentMessage.role;
-                messageToSend.type = agentMessage.type;
-                messageToSend.status = agentMessage.status; // 🔧 添加status字段
-                messageToSend.metadata = agentMessage.metadata;
-            } else {
-                // 旧的消息格式
-                messageToSend.messageType = agentMessage.type;
-                messageToSend.data = agentMessage.data;
-            }
+            // 🔧 统一消息格式：所有消息都使用相同的字段结构
+            messageToSend.role = agentMessage.role || 'assistant';
+            messageToSend.messageType = agentMessage.type;  // 内容类型放到messageType
+            messageToSend.status = agentMessage.status;     // 流式状态
+            messageToSend.metadata = agentMessage.metadata || agentMessage.data || {};
 
             this._view.webview.postMessage(messageToSend);
         }
@@ -803,15 +882,43 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 let isTyping = false;
 
                 // 🔧 强制标记 - 确认webview重新加载
-                console.log('🚀🚀🚀 [Frontend] WEBVIEW RELOADED - VERSION 5.0 - TIMESTAMP: ${Date.now()} 🚀🚀🚀');
-                alert('🚀 WEBVIEW LOADED - VERSION 5.0!');
+                console.log('🚀🚀🚀 [Frontend] WEBVIEW RELOADED - VERSION 7.0 - TIMESTAMP: ${Date.now()} 🚀🚀🚀');
+
+                // 立即发送调试信息
+                vscode.postMessage({
+                    type: 'frontendDebug',
+                    message: '🚀🚀🚀 [Frontend] WEBVIEW SCRIPT LOADED - VERSION 7.0'
+                });
 
                 // 通知扩展 webview 已准备就绪
                 window.addEventListener('load', function() {
                     console.log('🚀 [Frontend] Window loaded - sending webviewReady');
+
+                    // 发送调试信息
+                    vscode.postMessage({
+                        type: 'frontendDebug',
+                        message: '🚀 [Frontend] Window load event triggered, about to send webviewReady'
+                    });
+
                     setTimeout(() => {
+                        console.log('🚀 [Frontend] Sending webviewReady message now');
                         vscode.postMessage({ type: 'webviewReady' });
+
+                        // 确认消息已发送
+                        vscode.postMessage({
+                            type: 'frontendDebug',
+                            message: '🚀 [Frontend] webviewReady message sent'
+                        });
                     }, 100);
+                });
+
+                // 🔧 添加DOMContentLoaded事件作为备用
+                document.addEventListener('DOMContentLoaded', function() {
+                    console.log('🚀 [Frontend] DOMContentLoaded - backup webviewReady trigger');
+                    vscode.postMessage({
+                        type: 'frontendDebug',
+                        message: '🚀 [Frontend] DOMContentLoaded triggered as backup'
+                    });
                 });
 
                 // Auto-resize textarea
@@ -852,8 +959,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 }
 
                 function forceRestore() {
-                    console.log('🔄 [Frontend] Force restore button clicked, sending forceRestore message');
+                    console.log('🔄🔄🔄 [Frontend] Force restore button clicked!');
+                    console.log('🔄🔄🔄 [Frontend] About to send forceRestore message');
+
+                    // 发送调试信息到后端
+                    vscode.postMessage({
+                        type: 'frontendDebug',
+                        message: '🔄🔄🔄 [Frontend] Force restore button clicked, sending forceRestore message'
+                    });
+
+                    // 发送实际的恢复消息
                     vscode.postMessage({ type: 'forceRestore' });
+
+                    console.log('🔄🔄🔄 [Frontend] forceRestore message sent');
                 }
 
                 function updateSendButton() {
@@ -868,27 +986,42 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 }
 
                 function renderMessage(msg) {
-                    // 支持新的标准化消息格式
-                    const messageType = msg.type || msg.messageType;
+                    // 🔧 修复：优先使用messageType，因为恢复的消息中messageType才是真正的消息类型
+                    const messageType = msg.messageType || msg.type;
+
+                    console.log('🎨 [Frontend] renderMessage called with:', {
+                        messageType: messageType,
+                        msgMessageType: msg.messageType,
+                        msgType: msg.type,
+                        role: msg.role,
+                        contentLength: msg.content?.length || 0,
+                        contentPreview: msg.content?.substring(0, 50) || 'NO_CONTENT'
+                    });
 
                     switch (messageType) {
                         case 'think':
                         case 'thinking':
+                            console.log('🎨 [Frontend] Rendering as THINKING message');
                             return renderThinkingMessage(msg);
                         case 'tool':
+                            console.log('🎨 [Frontend] Rendering as TOOL message');
                             return renderToolMessage(msg);
                         case 'text':
+                            console.log('🎨 [Frontend] Rendering as TEXT message');
                             return renderChatMessage({
                                 role: msg.role || 'assistant',
                                 content: msg.content,
                                 timestamp: msg.timestamp
                             });
                         case 'error':
+                            console.log('🎨 [Frontend] Rendering as ERROR message');
                             return renderErrorMessage(msg);
                         case 'clear':
+                            console.log('🎨 [Frontend] Rendering as CLEAR message');
                             // clear 消息在 handleAgentMessage 中特殊处理
                             return null;
                         default:
+                            console.log('🎨 [Frontend] Rendering as DEFAULT message (will be chat message)');
                             // 默认渲染为聊天消息
                             return renderChatMessage({
                                 role: msg.role || (msg.messageType === 'user_message' ? 'user' : 'assistant'),
@@ -1014,7 +1147,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
                     const header = document.createElement('div');
                     header.className = 'thinking-header';
-                    header.innerHTML = \`💭 \${msg.messageType === 'planning' ? '规划' : '思考'} <span style="font-size: 10px;">▼</span>\`;
+                    // 🔧 修复：支持新旧两种消息格式
+                    const messageType = msg.type || msg.messageType;
+                    header.innerHTML = \`💭 \${messageType === 'planning' ? '规划' : '思考'} <span style="font-size: 10px;">▼</span>\`;
                     header.onclick = () => toggleThinking(thinkingDiv);
                     thinkingDiv.appendChild(header);
 
@@ -1286,11 +1421,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     // 🔧 超详细的消息打印
                     console.log('🔍🔍🔍 [Frontend] ===== MESSAGE DUMP START =====');
                     console.log('📋 Type:', message.type);
+                    console.log('📋 MessageType:', message.messageType);
                     console.log('📋 Role:', message.role);
                     console.log('📋 Content:', message.content);
                     console.log('📋 Status:', message.status);
                     console.log('📋 Timestamp:', message.timestamp);
                     console.log('📋 Metadata:', message.metadata);
+                    console.log('📋 Data:', message.data);
                     console.log('📋 FULL OBJECT:', JSON.stringify(message, null, 2));
                     console.log('🔍🔍🔍 [Frontend] ===== MESSAGE DUMP END =====');
 
@@ -1300,6 +1437,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                         message: '🔍 [Frontend] FULL MESSAGE DUMP',
                         data: {
                             type: message.type,
+                            messageType: message.messageType,
                             role: message.role,
                             status: message.status,
                             content: message.content,
@@ -1308,11 +1446,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     });
 
                     // 🔧 添加明显的标记确认代码更新
-                    console.log('🚀 [Frontend] CODE UPDATED - VERSION 5.0!');
+                    console.log('🚀 [Frontend] CODE UPDATED - VERSION 6.0!');
 
                     const container = document.getElementById('chatContainer');
-                    // 修正：优先使用 messageType，因为 type 可能是 "agentMessage"
+                    // 🔧 修复：优先使用 messageType，因为恢复消息中messageType才是真正的消息类型
                     const messageType = message.messageType || message.type;
+
+                    console.log('🔧 [Frontend] Determined messageType:', messageType, 'from message.messageType:', message.messageType, 'and message.type:', message.type);
 
                     // Handle clear message
                     if (messageType === 'clear') {
@@ -1340,7 +1480,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
                         if (message.status === 'start') {
                             console.log('🌊 [Frontend] Starting streaming message');
-                            createStreamingMessage(message.content, message.type || 'text', message.role || 'assistant');
+                            // 🔧 修复：使用messageType而不是type
+                            createStreamingMessage(message.content, message.messageType || 'text', message.role || 'assistant');
                             return;
                         }
 
@@ -1377,19 +1518,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     }
 
                     // Create message object for rendering
-                    // 支持新的标准化消息格式
-                    const msgObj = message.role && message.type ? {
-                        // 新的标准化消息格式
+                    // 🔧 修复：统一使用messageType字段，避免混淆
+                    const msgObj = {
+                        messageType: message.messageType || message.type,  // 优先使用messageType
                         role: message.role,
-                        type: message.type,
                         content: message.content,
-                        metadata: message.metadata,
-                        timestamp: message.timestamp
-                    } : {
-                        // 旧的消息格式
-                        messageType: message.messageType,
-                        content: message.content,
-                        data: message.data,
+                        data: message.data || message.metadata,
                         timestamp: message.timestamp
                     };
 
