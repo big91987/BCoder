@@ -1,28 +1,33 @@
 {
   "name": "bcoder",
   "displayName": "BCoder AI Assistant",
-  "description": "AI-powered code completion and chat assistant",
+  "description": "AI-powered coding assistant for VSCode",
   "version": "0.1.0",
   "publisher": "bcoder",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/big91987/BCoder.git"
-  },
   "engines": {
     "vscode": "^1.74.0"
   },
   "categories": [
-    "Programming Languages",
+    "Other",
     "Machine Learning",
-    "Other"
+    "Programming Languages"
   ],
   "keywords": [
     "ai",
-    "code completion",
     "assistant",
-    "autocomplete",
-    "intellisense"
+    "coding",
+    "completion",
+    "chat"
   ],
+  "icon": "icon.png",
+  "galleryBanner": {
+    "color": "#1e1e1e",
+    "theme": "dark"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bcoder/bcoder-vscode"
+  },
   "activationEvents": [
     "*"
   ],
@@ -48,8 +53,7 @@
         "command": "bcoder.toggleCompletion",
         "title": "Toggle Auto Completion",
         "category": "BCoder"
-      }
-,
+      },
       {
         "command": "bcoder.openSettings",
         "title": "Open Settings",
@@ -90,6 +94,12 @@
         "command": "bcoder.newChatSession",
         "title": "New Chat Session",
         "category": "BCoder"
+      },
+      {
+        "command": "bcoder.showContext",
+        "title": "Show Current Context",
+        "category": "BCoder",
+        "icon": "$(info)"
       }
     ],
     "keybindings": [
@@ -102,6 +112,11 @@
         "command": "bcoder.explainCode",
         "key": "ctrl+shift+e",
         "mac": "cmd+shift+e"
+      },
+      {
+        "command": "bcoder.showContext",
+        "key": "ctrl+shift+i",
+        "mac": "cmd+shift+i"
       }
     ],
     "menus": {
@@ -113,6 +128,10 @@
         },
         {
           "command": "bcoder.generateCode",
+          "group": "bcoder"
+        },
+        {
+          "command": "bcoder.showContext",
           "group": "bcoder"
         }
       ],
@@ -131,11 +150,19 @@
         },
         {
           "command": "bcoder.openSettings"
+        },
+        {
+          "command": "bcoder.showContext"
         }
       ],
       "view/title": [
         {
           "command": "bcoder.openSettings",
+          "when": "view == bcoderChat",
+          "group": "navigation"
+        },
+        {
+          "command": "bcoder.showContext",
           "when": "view == bcoderChat",
           "group": "navigation"
         }

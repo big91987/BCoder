@@ -2,11 +2,13 @@ import * as vscode from 'vscode';
 import { ChatProvider } from './chatProvider';
 import { logger } from './utils/logger';
 import { ChatCache, ChatMessage } from './utils/chatCache';
+import { ContextManager } from './context/contextManager';
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'bcoderChat';
     private _view?: vscode.WebviewView;
     private _chatCache: ChatCache;
+    private _contextManager: ContextManager;
 
     constructor(
         private readonly _extensionUri: vscode.Uri,
@@ -15,7 +17,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     ) {
         logger.info('🔧 ChatViewProvider constructor called - NEW VERSION');
         this._chatCache = ChatCache.getInstance(context);
-        logger.info('✅ ChatViewProvider initialized with cache system');
+        this._contextManager = ContextManager.getInstance();
+        logger.info('✅ ChatViewProvider initialized with cache and context systems');
 
         // 立即检查缓存状态
         const stats = this._chatCache.getCacheStats();
@@ -112,24 +115,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private restoreMessagesFromCache(messages: any[]) {
         logger.info(`🔄 Restoring ${messages.length} messages from cache`);
 
-        // 🔧 添加详细的缓存消息调试
-        logger.info('🔍🔍🔍 [RESTORE] ===== CACHE MESSAGES DUMP START =====');
-        logger.info(`🔍 [RESTORE] Total messages in cache: ${messages.length}`);
+        // 🔧 缓存恢复摘要
+        logger.info(`🔄 [RESTORE] Restoring ${messages.length} messages from cache`);
 
-        messages.forEach((msg, index) => {
-            logger.info(`🔍 [RESTORE] Message ${index + 1}/${messages.length}:`);
-            logger.info(`  📝 ID: ${msg.id}`);
-            logger.info(`  👤 Role: ${msg.role}`);
-            logger.info(`  🏷️ MessageType: ${msg.messageType || 'undefined'}`);
-            logger.info(`  📏 Content Length: ${msg.content?.length || 0}`);
-            logger.info(`  ⏰ Timestamp: ${msg.timestamp}`);
-            logger.info(`  📄 Content Preview: "${msg.content?.substring(0, 200) || 'NO_CONTENT'}"`);
-            logger.info(`  🗂️ Data: ${JSON.stringify(msg.data || {}, null, 2)}`);
-            logger.info(`  🔍 Full Message: ${JSON.stringify(msg, null, 2)}`);
-            logger.info('  ─────────────────────────────────────────────────────');
-        });
-
-        logger.info('🔍🔍🔍 [RESTORE] ===== CACHE MESSAGES DUMP END =====');
+        // 只在DEBUG模式下显示详细信息
+        if (process.env.NODE_ENV === 'development') {
+            const summary = messages.map((msg, index) => ({
+                index: index + 1,
+                role: msg.role,
+                type: msg.messageType || 'text',
+                contentLength: msg.content?.length || 0,
+                timestamp: new Date(msg.timestamp).toLocaleTimeString()
+            }));
+            logger.debug(`🔍 [RESTORE] Messages summary:`, summary);
+        }
 
         if (!this._view) {
             logger.warn('⚠️ No webview available for restore');
@@ -147,12 +146,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             const msg = messages[messageIndex];
             messageIndex++;
 
-            logger.info(`🔧 [RESTORE] Processing message ${messageIndex}/${messages.length}:`, {
-                messageType: msg.messageType,
-                role: msg.role,
-                contentLength: msg.content?.length || 0,
-                contentPreview: msg.content?.substring(0, 50) || 'NO_CONTENT'
-            });
+            // 简化日志：只在DEBUG模式下显示详细信息
+            if (process.env.NODE_ENV === 'development') {
+                logger.debug(`🔄 [RESTORE] Processing message ${messageIndex}/${messages.length}: ${msg.messageType || 'text'} (${msg.content?.length || 0} chars)`);
+            }
 
             // 🔧 修复：只跳过空消息和不需要恢复的消息类型
             if (!msg.content?.trim()) {
@@ -172,7 +169,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             ];
 
             if (skipMessageTypes.includes(msg.messageType)) {
-                logger.info(`🔧 [RESTORE] ⏭️ SKIPPING ${msg.messageType} message: "${msg.content?.substring(0, 50)}"`);
                 setTimeout(sendNextMessage, 10);
                 return;
             }
@@ -188,8 +184,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             ];
 
             if (!allowedMessageTypes.includes(msg.messageType)) {
-                logger.info(`🔧 [RESTORE] ⚠️ UNKNOWN message type: ${msg.messageType}, content: "${msg.content?.substring(0, 50)}" - ALLOWING`);
                 // 不跳过未知类型，让它通过，以防遗漏重要消息
+                logger.debug(`🔄 [RESTORE] Unknown message type: ${msg.messageType}`);
             }
 
             // 🔧 修复：发送消息到前端，使用新的标准化格式
@@ -216,14 +212,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 };
             }
 
-            logger.info(`🔧 [RESTORE] 📤 SENDING to frontend:`, {
-                type: messageToSend.type,
-                role: messageToSend.role,
-                messageType: messageToSend.messageType,
-                contentLength: messageToSend.content?.length || 0,
-                contentPreview: messageToSend.content?.substring(0, 50) || 'NO_CONTENT',
-                fullMessage: JSON.stringify(messageToSend, null, 2)
-            });
+            // 简化日志：只在DEBUG模式下显示详细信息
+            if (process.env.NODE_ENV === 'development') {
+                logger.debug(`📤 [RESTORE] Sending ${messageToSend.messageType} message (${messageToSend.content?.length || 0} chars)`);
+            }
 
             this._view!.webview.postMessage(messageToSend);
 
@@ -235,15 +227,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     private async handleUserMessage(message: string) {
-        logger.info('📝 handleUserMessage called - NEW VERSION:', message.substring(0, 50));
         if (!message.trim()) return;
 
         // Add user message to cache
-        logger.info('💾 Adding user message to cache');
         this._chatCache.addMessage('user', message);
-
-        const messagesAfterAdd = this._chatCache.getCurrentMessages();
-        logger.info(`📊 Messages count after add: ${messagesAfterAdd.length}`);
+        logger.info(`💬 User message added to cache (${this._chatCache.getCurrentMessages().length} total messages)`);
 
         // 🔧 修复：发送用户消息到前端，使用正确的消息类型
         if (this._view) {
@@ -260,10 +248,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             // Show typing indicator
             this.showTypingIndicator();
 
+            // 🚀 新增：获取当前上下文信息
+            const contextSummary = await this._contextManager.getContextSummary();
+            logger.info('📍 Current context summary:', contextSummary.substring(0, 200) + '...');
+
             // 🔧 修复：不再创建空助手消息，流式消息会通过handleAgentMessage自动保存
 
-            // Get AI response with structured message handling
-            const response = await this._chatProvider.askQuestionWithStructuredMessages(message, (agentMessage: any) => {
+            // Get AI response with structured message handling, including context
+            const messageWithContext = `${contextSummary}\n\n用户问题: ${message}`;
+            await this._chatProvider.askQuestionWithStructuredMessages(messageWithContext, (agentMessage: any) => {
                 // Handle structured agent messages
                 this.handleAgentMessage(agentMessage);
             });
@@ -328,30 +321,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private activeStreamingTypes: Set<string> = new Set();
 
     private handleAgentMessage(agentMessage: any) {
-        // 🔧 打印原始消息对象
-        logger.info('🔍🔍🔍 [RAW MSG] ===== ORIGINAL MESSAGE DUMP =====');
-        logger.info('🔍🔍🔍 [RAW MSG] FULL OBJECT:', JSON.stringify(agentMessage, null, 2));
-        logger.info('🔍🔍🔍 [RAW MSG] ===== END DUMP =====');
-
-        logger.debug(`[CHAT] [${agentMessage.sessionId || 'unknown'}] Agent message: ${agentMessage.type}`, {
-            content: agentMessage.content
-        });
-
-        // 🔧 新的标准化流式消息处理逻辑
-        logger.debug(`🔧 [STREAMING] Processing message: type=${agentMessage.type}, status=${agentMessage.status}`);
+        // 简化日志：只在DEBUG模式下显示详细信息
+        if (process.env.NODE_ENV === 'development') {
+            logger.debug(`🔧 [STREAMING] Processing: ${agentMessage.type}/${agentMessage.status} (${agentMessage.content?.length || 0} chars)`);
+        }
 
         // 🔧 新的缓存策略：只缓存完整消息，不缓存流式片段
         if (agentMessage.status) {
             // 新的标准化消息格式：start/delta/end
             if (agentMessage.status === 'start') {
                 // 开始流式消息，初始化该类型的累积器
-                logger.debug(`🔧 [STREAMING] Starting ${agentMessage.type} stream`);
                 this.streamingAccumulators.set(agentMessage.type, agentMessage.content || '');
                 this.activeStreamingTypes.add(agentMessage.type);
                 // ❌ 不保存到缓存 - 只是流式开始
             } else if (agentMessage.status === 'delta') {
                 // 累积流式内容
-                logger.debug(`🔧 [STREAMING] Delta for ${agentMessage.type}: "${agentMessage.content}"`);
                 if (this.activeStreamingTypes.has(agentMessage.type)) {
                     const current = this.streamingAccumulators.get(agentMessage.type) || '';
                     this.streamingAccumulators.set(agentMessage.type, current + (agentMessage.content || ''));
@@ -359,22 +343,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 // ❌ 不保存到缓存 - 只是流式片段
             } else if (agentMessage.status === 'end') {
                 // 流式完成，保存完整内容到缓存
-                logger.debug(`🔧 [STREAMING] Ending ${agentMessage.type} stream, final content: "${agentMessage.content}"`);
                 if (this.activeStreamingTypes.has(agentMessage.type)) {
                     // ✅ 只在这里保存完整消息到缓存
                     const accumulatedContent = this.streamingAccumulators.get(agentMessage.type) || '';
                     const finalContent = agentMessage.content || accumulatedContent;
 
-                    logger.info(`🔧 [CACHE] 💾 SAVING COMPLETE MESSAGE:`);
-                    logger.info(`  🏷️ Type: ${agentMessage.type}`);
-                    logger.info(`  📏 Content Length: ${finalContent.length}`);
-                    logger.info(`  📄 Content: "${finalContent}"`);
-                    logger.info(`  🗂️ Metadata: ${JSON.stringify(agentMessage.metadata || {}, null, 2)}`);
-
                     const savedMessage = this._chatCache.addStructuredMessage(agentMessage.type, finalContent, agentMessage.metadata || {});
-
-                    logger.info(`🔧 [CACHE] ✅ SAVED MESSAGE WITH ID: ${savedMessage.id}`);
-                    logger.info(`🔧 [CACHE] 📊 Total messages in cache now: ${this._chatCache.getCurrentMessages().length}`);
+                    logger.info(`💾 [CACHE] Saved ${agentMessage.type} message (${finalContent.length} chars) - ID: ${savedMessage.id}`);
 
                     // 清理该类型的累积器
                     this.activeStreamingTypes.delete(agentMessage.type);
@@ -398,17 +373,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 if (this.activeStreamingTypes.has('text')) {
                     // ✅ 只在这里保存完整消息到缓存
                     const finalContent = this.streamingAccumulators.get('text') || '';
-                    logger.debug(`🔧 [CACHE] Saving complete text message: "${finalContent.substring(0, 100)}..."`);
                     this._chatCache.addStructuredMessage('text', finalContent, {});
-                    logger.debug(`🔧 [CACHE] ✅ Saved complete text message to cache`);
                     this.activeStreamingTypes.delete('text');
                     this.streamingAccumulators.delete('text');
                 }
             } else {
                 // 非流式消息，直接保存到缓存
-                logger.debug(`🔧 [CACHE] Saving non-streaming message: ${agentMessage.type}`);
                 this._chatCache.addStructuredMessage(agentMessage.type, agentMessage.content, agentMessage.data || agentMessage.metadata);
-                logger.debug(`🔧 [CACHE] ✅ Saved ${agentMessage.type} message to cache`);
             }
         }
 
@@ -432,7 +403,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
 
 
-    private _getHtmlForWebview(webview: vscode.Webview) {
+    private _getHtmlForWebview(_webview: vscode.Webview) {
         return `<!DOCTYPE html>
         <html lang="en">
         <head>

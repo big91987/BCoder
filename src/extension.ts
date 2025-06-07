@@ -267,6 +267,25 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.window.showInformationMessage('已创建新的聊天会话');
     });
 
+    // 🚀 新增：测试上下文功能的命令
+    const showContextCommand = vscode.commands.registerCommand('bcoder.showContext', async () => {
+        try {
+            const { ContextManager } = await import('./context/contextManager');
+            const contextManager = ContextManager.getInstance();
+            const contextSummary = await contextManager.getContextSummary();
+
+            // 在新文档中显示上下文信息
+            const doc = await vscode.workspace.openTextDocument({
+                content: `# BCoder 当前上下文信息\n\n${contextSummary}`,
+                language: 'markdown'
+            });
+            await vscode.window.showTextDocument(doc);
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            vscode.window.showErrorMessage(`BCoder Error: ${errorMessage}`);
+        }
+    });
+
     // Register chat view provider
     logger.info('🔧 Registering chat view provider - NEW CACHE VERSION...');
     const chatViewProvider = new ChatViewProvider(context.extensionUri, chatProvider, context);
@@ -294,6 +313,7 @@ export async function activate(context: vscode.ExtensionContext) {
         showCacheStatsCommand,
         clearCacheCommand,
         newChatSessionCommand,
+        showContextCommand,
         chatViewDisposable,
         settingsViewDisposable
     );
